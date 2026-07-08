@@ -118,7 +118,7 @@ export function WebsiteInfoExtractor<T extends HTMLElement>({
                 includeSearch ? uri.search : undefined,
                 includeHash ? uri.hash : undefined,
             ].filter(segment => segment).join(''),
-            title: element instanceof HTMLMetaElement ? element.content.trim() : element.innerText.trim(),
+            title: element instanceof HTMLMetaElement ? (element.content || '').trim() : (element.innerText || element.textContent || '').trim(),
         };
     };
 }

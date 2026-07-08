@@ -34,7 +34,8 @@ export interface ResponseMeta {
  */
 export interface DownloadRequest {
     sourceId: string;
-    mangaId: string;
+    mangaId?: string;
+    mangaUrl?: string;
     chapterIds: string[];
     format?: 'cbz' | 'pdf' | 'epub' | 'images';
     downloadPath?: string; // Optional custom download location (absolute path)
@@ -51,6 +52,7 @@ export interface DownloadStatus {
     id: string;
     sourceId: string;
     mangaId: string;
+    mangaUrl?: string;
     mangaTitle?: string;
     chapterIds: string[];
     status: 'queued' | 'downloading' | 'processing' | 'completed' | 'failed' | 'cancelled';

@@ -1,3 +1,4 @@
+import './RegExpSafe.js';
 import { Initialize as InitGlobalSettings, Key as GlobalKey, type IFrontendInfo } from './SettingsGlobal';
 import { Tags } from './Tags';
 import { PluginController } from './PluginController';

@@ -107,7 +107,7 @@ function CreateChapterInfoExtractor<T extends HTMLAnchorElement>(manga: Manga, q
             }
         }
         const id = anchor.pathname;
-        let title = (anchor.querySelector<HTMLElement>(queryTitle)?.innerText ?? anchor.innerText).trim();
+        let title = (anchor.querySelector<HTMLElement>(queryTitle)?.textContent ?? anchor.textContent).trim();
         title = title.replace(manga.Title, '').trim() || manga.Title;
         return { id, title };
     };

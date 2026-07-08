@@ -55,7 +55,8 @@ class DownloadService {
         const status: DownloadStatus = {
             id: downloadId,
             sourceId: request.sourceId,
-            mangaId: request.mangaId,
+            mangaId: request.mangaId || 'pending...',
+            mangaUrl: request.mangaUrl,
             chapterIds: request.chapterIds,
             status: 'queued',
             progress: 0,
@@ -95,14 +96,42 @@ class DownloadService {
             }
 
             // Get manga
-            const mangas = await plugin.Entries;
-            const manga = mangas.Value.find((m: any) => m.Identifier === request.mangaId);
+            let manga: any;
+            if (request.mangaUrl) {
+                manga = await plugin.TryGetEntry(request.mangaUrl);
+                if (manga) {
+                    this.updateDownloadStatus(downloadId, {
+                        mangaId: manga.Identifier,
+                        mangaTitle: manga.Title
+                    });
+                }
+            } else if (request.mangaId) {
+                const mangas = await plugin.Entries;
+                manga = mangas.Value.find((m: any) => m.Identifier === request.mangaId);
+                
+                if (!manga) {
+                    try {
+                        manga = await plugin.TryGetEntry(request.mangaId);
+                        if (manga) {
+                            this.updateDownloadStatus(downloadId, {
+                                mangaId: manga.Identifier,
+                                mangaTitle: manga.Title
+                            });
+                        }
+                    } catch (e) {
+                        // Ignore fallback error
+                    }
+                }
+            }
 
             if (!manga) {
-                throw Errors.MangaNotFound(request.mangaId);
+                throw Errors.MangaNotFound(request.mangaUrl || request.mangaId || 'Unknown');
             }
 
             // Get chapters
+            if (manga.Entries.Value.length === 0) {
+                await manga.Update();
+            }
             const chapters = await manga.Entries;
 
             // Log available chapter IDs for debugging

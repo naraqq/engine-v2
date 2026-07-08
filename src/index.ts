@@ -5,6 +5,18 @@ import { CleanupFetchProvider } from './engine/platform/FetchProvider.js';
 import { config, validateConfig } from './config/settings.js';
 import { logger } from './config/logger.js';
 import { promises as fs } from 'fs';
+import { JSDOM } from 'jsdom';
+
+// Polyfill required DOM interfaces globally for decorators
+const _dom = new JSDOM('');
+globalThis.HTMLElement = _dom.window.HTMLElement;
+globalThis.HTMLMetaElement = _dom.window.HTMLMetaElement;
+globalThis.HTMLAnchorElement = _dom.window.HTMLAnchorElement;
+
+// JSDOM does not implement innerText, which many decorators use
+Object.defineProperty(globalThis.HTMLElement.prototype, 'innerText', {
+    get() { return this.textContent; }
+});
 
 /**
  * Initialize required directories

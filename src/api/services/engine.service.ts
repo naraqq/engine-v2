@@ -222,7 +222,15 @@ class EngineService {
 
         try {
             const mangas = await plugin.Entries;
-            const manga = mangas.Value.find((m: any) => m.Identifier === mangaId);
+            let manga = mangas.Value.find((m: any) => m.Identifier === mangaId);
+
+            if (!manga) {
+                try {
+                    manga = await plugin.TryGetEntry(mangaId);
+                } catch (err) {
+                    // Ignore fallback error
+                }
+            }
 
             if (!manga) {
                 throw Errors.MangaNotFound(mangaId);
@@ -265,11 +273,22 @@ class EngineService {
             let manga = currentMangas.find((m: any) => m.Identifier === mangaId);
 
             if (!manga) {
-                logger.info(`🔄 Manga not in cache, creating direct manga object...`);
-                // Create manga object directly without fetching all mangas
-                // This is much faster than fetching the entire manga list
-                manga = plugin.CreateEntry(mangaId, `Manga ${mangaId}`);
-                logger.info(`✅ Created manga object for ID: ${mangaId}`);
+                logger.info(`🔄 Manga not in cache, attempting to resolve directly...`);
+                try {
+                    manga = await plugin.TryGetEntry(mangaId);
+                } catch (err) {
+                    // Ignore fallback error
+                }
+                
+                if (!manga) {
+                    logger.info(`🔄 Manga resolution failed, creating direct manga object...`);
+                    // Create manga object directly without fetching all mangas
+                    // This is much faster than fetching the entire manga list
+                    manga = plugin.CreateEntry(mangaId, `Manga ${mangaId}`);
+                    logger.info(`✅ Created manga object for ID: ${mangaId}`);
+                } else {
+                    logger.info(`✅ Resolved manga object directly: "${manga.Title}"`);
+                }
             } else {
                 logger.info(`✅ Found manga in cache: "${manga.Title}" (${mangaId})`);
             }

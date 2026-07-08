@@ -9,7 +9,8 @@ export const schemas = {
     // Download request
     downloadRequest: z.object({
         sourceId: z.string().min(1, 'Source ID is required'),
-        mangaId: z.string().min(1, 'Manga ID is required'),
+        mangaId: z.string().optional(),
+        mangaUrl: z.string().url('Must be a valid URL').optional(),
         chapterIds: z.array(z.string()).min(1, 'At least one chapter ID is required'),
         format: z.enum(['cbz', 'pdf', 'epub', 'images']).default('cbz'),
         downloadPath: z.string().optional().refine(
@@ -25,6 +26,9 @@ export const schemas = {
             quality: z.enum(['low', 'medium', 'high']).optional(),
             includeMetadata: z.boolean().optional(),
         }).optional(),
+    }).refine(data => data.mangaId || data.mangaUrl, {
+        message: 'Either mangaId or mangaUrl is required',
+        path: ['mangaUrl']
     }),
 
     // Search query
