@@ -2,9 +2,7 @@ import type { MediaInfoTracker } from './trackers/IMediaInfoTracker';
 import type { MediaContainer, MediaChild } from './providers/MediaPlugin';
 import type { SettingsManager } from './SettingsManager';
 import type { StorageController } from './StorageController';
-import * as mocks from './websites/_mocks_/_index';
 import * as websites from './websites/_index';
-import { Kitsu } from './trackers/Kitsu';
 
 type TWebsite = MediaContainer<MediaContainer<MediaChild>>;
 
@@ -14,11 +12,9 @@ export class PluginController {
     private readonly _trackers: MediaInfoTracker[];
 
     constructor(storageController: StorageController, settingsManager: SettingsManager) {
-        this._trackers = [
-            new Kitsu(settingsManager)
-        ];
+        // Account-based media tracking is intentionally disabled in API-only mode.
+        this._trackers = [];
         this._websites = [
-            ... globalThis?.location?.hostname === 'localhost' ? Object.values(mocks).map(website => new website().CreatePlugin(storageController, settingsManager)) : [],
             ... Object.values(websites).map(website => new website().CreatePlugin(storageController, settingsManager)),
         ];
     }

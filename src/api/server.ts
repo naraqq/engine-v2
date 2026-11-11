@@ -79,7 +79,7 @@ export function createApp(): Express {
         const openapiPath = path.join(__dirname, '../../openapi.yaml');
         const openapiDocument = yaml.parse(readFileSync(openapiPath, 'utf8'));
         app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openapiDocument, {
-            customSiteTitle: 'HakuNeko API Documentation',
+            customSiteTitle: 'Engine V2 API Documentation',
             customCss: '.swagger-ui .topbar { display: none }',
         }));
         logger.info('📖 API Documentation available at /api-docs');
@@ -107,7 +107,7 @@ export async function startServer(): Promise<void> {
     const app = createApp();
 
     app.listen(config.port, config.host, () => {
-        logger.info(`🚀 HakuNeko API Server started`);
+        logger.info(`🚀 Engine V2 API Server started`);
         logger.info(`📡 Listening on http://${config.host}:${config.port}`);
         logger.info(`🌍 Environment: ${config.nodeEnv}`);
         logger.info(`📚 API Version: ${config.apiVersion}`);

@@ -1,6 +1,6 @@
 openapi: 3.0.3
 info:
-  title: HakuNeko Manga Downloader API
+  title: Engine V2 Manga Downloader API
   description: |
     REST API for downloading manga from 788+ sources with built-in Cloudflare bypass support.
 
@@ -16,8 +16,7 @@ info:
 
   version: 1.0.0
   contact:
-    name: HakuNeko API
-    url: https://github.com/manga-download/hakuneko
+    name: Engine V2
   license:
     name: Unlicense
     url: https://unlicense.org/

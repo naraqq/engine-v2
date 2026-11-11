@@ -104,15 +104,11 @@ describe('PluginController', () => {
 
     describe('InfoTrackers', () => {
 
-        it('Should have unique info tracker identifiers', async () => {
+        it('Should not initialize account trackers in API-only mode', async () => {
             const fixture = new TestFixture();
             const testee = fixture.CreateTestee();
 
-            const actual = testee.InfoTrackers.map(plugin => plugin.Identifier);
-            const expected = [...new Set(actual).values()];
-
-            expect(actual.length).toBeGreaterThan(0);
-            expect(actual).toStrictEqual(expected);
+            expect(testee.InfoTrackers).toEqual([]);
         });
     });
 });

@@ -40,6 +40,20 @@ export const config = {
         temp: path.join(process.env.STORAGE_PATH || path.join(__dirname, '../../storage'), 'temp'),
         database: path.join(process.env.STORAGE_PATH || path.join(__dirname, '../../storage'), 'database'),
         cache: path.join(process.env.STORAGE_PATH || path.join(__dirname, '../../storage'), 'cache'),
+        translations: path.join(process.env.STORAGE_PATH || path.join(__dirname, '../../storage'), 'translations'),
+    },
+
+    // Manga translator (Gemini)
+    translator: {
+        apiKey: process.env.GEMINI_API_KEY,
+        translateModel: process.env.GEMINI_TRANSLATE_MODEL || 'gemini-3.5-flash-lite',
+        thinkingBudget: parseInt(process.env.GEMINI_THINKING_BUDGET || '256', 10),
+        /** Local OCR runs on the GPU via DirectML ("dml"); "cpu" works everywhere but ~2.5x slower. */
+        ocrProvider: process.env.OCR_PROVIDER || 'dml',
+        /** Font for the Mongolian text; must contain Ө/Ү (Segoe UI, Arial, Verdana, Tahoma do — Comic Sans does not). */
+        font: process.env.TRANSLATOR_FONT || 'C:/Windows/Fonts/segoeuib.ttf',
+        tileHeight: parseInt(process.env.TRANSLATOR_TILE_HEIGHT || '1440', 10),
+        tileOverlap: parseInt(process.env.TRANSLATOR_TILE_OVERLAP || '400', 10),
     },
 
     // Puppeteer

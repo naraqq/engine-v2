@@ -47,7 +47,7 @@ async function main(): Promise<void> {
         // Initialize directories
         await initializeDirectories();
 
-        logger.info('🎌 HakuNeko API Starting...');
+        logger.info('🎌 Engine V2 Starting...');
         logger.info(`📂 Storage: ${config.storage.root}`);
 
         // Initialize HakuNeko engine

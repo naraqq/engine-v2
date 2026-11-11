@@ -1,8 +1,8 @@
-# HakuNeko Manga Downloader API
+# Engine V2
 
 A production-grade REST API for downloading manga from 788+ sources with built-in Cloudflare bypass capabilities.
 
-> This is a clone of [HakuNeko](https://github.com/manga-download/haruneko) that has been converted into a RESTful API service.
+> Engine V2 is a personal manga-downloader API built on the [HakuNeko](https://github.com/manga-download/haruneko) scraping engine.
 
 ## 🚀 Features
 
@@ -25,8 +25,8 @@ A production-grade REST API for downloading manga from 788+ sources with built-i
 #### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/Ali-932/haruneko-api
-cd haruneko
+git clone <your-engine-v2-repository-url>
+cd engine-v2
 ```
 
 #### 2. Install Dependencies
