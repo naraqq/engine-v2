@@ -4,7 +4,7 @@ import { config } from '../config/settings.js';
 import { logger } from '../config/logger.js';
 import { detectPage, toTextLines } from './detect.js';
 import { renderPage } from './render.js';
-import { loadGlossary, needsWork, saveGlossary, translateRegions } from './translate.js';
+import { loadGlossary, needsWork, polishRegions, saveGlossary, translateRegions } from './translate.js';
 import type { PageResult } from './types.js';
 
 const IMAGE_EXT = /\.(webp|png|jpe?g)$/i;
@@ -78,7 +78,14 @@ export async function processChapter(series: string, chapter: string, opts: Chap
             delete r.translation;
         }
     }
-    const pending = opts.force || opts.retranslate ? all : all.filter(needsWork);
+    // OCR fragments with almost no letters ("5", "J", "1E" — usually SFX or borders read at high zoom) are
+    // skipped here instead of paying to send them to the model.
+    const junk = new Set(all.filter(r => r.type === 'unknown' && r.lines.join('').replace(/[^\p{L}\p{N}]/gu, '').length < 3));
+    for (const r of junk) {
+        r.type = 'skip';
+        r.translation = [];
+    }
+    const pending = (opts.force || opts.retranslate ? all : all.filter(needsWork)).filter(r => !junk.has(r));
     if (pending.length === 0) {
         logger.info(`[${series}/${chapter}] already translated`);
     } else {
@@ -87,6 +94,10 @@ export async function processChapter(series: string, chapter: string, opts: Chap
         logger.info(`[${series}/${chapter}] translating ${pending.length} blocks (glossary: ${glossary.terms.length} terms)`);
         await translateRegions(pending, widths, glossary);
         await saveGlossary(seriesOut, glossary);
+        if (config.translator.polish) {
+            const changed = await polishRegions(pending);
+            logger.info(`[${series}/${chapter}] polish pass rewrote ${changed} lines`);
+        }
 
         const now = new Date().toISOString();
         for (const p of pages) {

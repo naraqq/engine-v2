@@ -46,12 +46,24 @@ export const config = {
     // Manga translator (Gemini)
     translator: {
         apiKey: process.env.GEMINI_API_KEY,
-        translateModel: process.env.GEMINI_TRANSLATE_MODEL || 'gemini-3.5-flash-lite',
+        /** Translation model: a Gemini model name, or a claude-* model (needs ANTHROPIC_API_KEY). */
+        translateModel: process.env.TRANSLATE_MODEL || process.env.GEMINI_TRANSLATE_MODEL || 'gemini-3.5-flash-lite',
+        anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+        /** Claude thinking depth: low | medium | high. */
+        claudeEffort: process.env.CLAUDE_EFFORT || 'low',
+        /** Mongolian voice: rules + example pairs used by translation and polish (edit this file to tune the style). */
+        styleFile: process.env.TRANSLATOR_STYLE || path.join(__dirname, '../../assets/translation/style.json'),
+        /** Run the native-editor polish pass after translating (set TRANSLATOR_POLISH=false to skip). */
+        polish: process.env.TRANSLATOR_POLISH !== 'false',
         thinkingBudget: parseInt(process.env.GEMINI_THINKING_BUDGET || '256', 10),
         /** Local OCR runs on the GPU via DirectML ("dml"); "cpu" works everywhere but ~2.5x slower. */
         ocrProvider: process.env.OCR_PROVIDER || 'dml',
-        /** Font for the Mongolian text; must contain Ө/Ү (Segoe UI, Arial, Verdana, Tahoma do — Comic Sans does not). */
-        font: process.env.TRANSLATOR_FONT || 'C:/Windows/Fonts/segoeuib.ttf',
+        /** Zoom levels OCR reads each tile at; 2x/3x are needed for small or stylised system-window lettering. */
+        ocrScales: (process.env.OCR_SCALES || '2,3').split(',').map(Number).filter(n => n > 0),
+        /** Font for the Mongolian text; must contain Ө/Ү. Default: Bubble Sans (comic lettering, full Mongolian Cyrillic). */
+        font: process.env.TRANSLATOR_FONT || path.join(__dirname, '../../assets/fonts/bubble-sans-1.01.otf'),
+        /** LaMa inpainting model (erases text on artwork). https://huggingface.co/Carve/LaMa-ONNX → lama_fp32.onnx */
+        lamaModel: process.env.TRANSLATOR_LAMA_MODEL || path.join(process.env.STORAGE_PATH || path.join(__dirname, '../../storage'), 'models', 'lama_fp32.onnx'),
         tileHeight: parseInt(process.env.TRANSLATOR_TILE_HEIGHT || '1440', 10),
         tileOverlap: parseInt(process.env.TRANSLATOR_TILE_OVERLAP || '400', 10),
     },

@@ -1,0 +1,34 @@
+{
+    "_comment": "Mongolian voice for the manga translator. Add rules and example pairs here; every translation and polish call reads this file. 'ai' = how a literal translation sounds (avoid), 'natural' = how it should read.",
+    "rules": [
+        "Write the way Mongolian webtoon readers actually talk: short, punchy, spoken Mongolian, not written/literary style.",
+        "Cut every word the scene already makes clear: pronouns (би, чи, тэр), place words (тэндээ, энд), and filler like 'just', 'finally', 'even', 'properly' unless they carry the point.",
+        "Prefer spoken forms and particles: гархад, боллоо, шүү дээ, л, бүр, юм чинь.",
+        "Keep rudeness and swearing at the same strength as the English (shit → баас, not хог).",
+        "Numbers may stay as digits when that is how people write them (4р давхар).",
+        "A short exclamation stays short: 'Hold it right there!' → 'Зогс!'.",
+        "Never pad a line to explain it; if the Mongolian is shorter than the English, that is usually right."
+    ],
+    "examples": [
+        {
+            "en": "I JUST... NEED TO GET TO THE FOURTH FLOOR, AND THEN I'LL FINALLY BE THERE...",
+            "ai": "Би дөрөв давхар луу л гараад л... тэгвэл арай гэж нэг юм хүрэх нь...",
+            "natural": "4р давхарлуу гархад л боллоо"
+        },
+        {
+            "en": "HOLD IT RIGHT THERE.",
+            "ai": "Тэндээ зогс!",
+            "natural": "Зогс!"
+        },
+        {
+            "en": "YOU DIDN'T EVEN LOOK AT IT PROPERLY!",
+            "ai": "Чи зүгээр сайн харж ч үзээгүй атлаа!",
+            "natural": "Чи бүр сайн хараагүй шүү дээ!"
+        },
+        {
+            "en": "YOU CAN JUST TELL WHAT SHIT IS.",
+            "ai": "Хог ямар байдгийг шууд харсан ч мэднэ.",
+            "natural": "Баас ямар байдгийг хараад л мэднэ."
+        }
+    ]
+}

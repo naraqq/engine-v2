@@ -20,6 +20,7 @@
         "update-website-index": "node ./scripts/website-index.mjs"
     },
     "dependencies": {
+        "@anthropic-ai/sdk": "^1.8.0",
         "@google/genai": "^3.1.0",
         "@napi-rs/canvas": "^1.1.0",
         "@types/archiver": "^7.0.0",

@@ -42,16 +42,25 @@ export async function measureStyle(image: Sharp, pageW: number, pageH: number, b
     const nearShare = paper.filter(p => dist(p, bg) <= 12).length / Math.max(1, paper.length);
     const inkShare = 1 - paper.length / Math.max(1, ring.length);
 
-    const ink = inner.filter(p => dist(p, bg) > 80);
-    const textColor: RGB = ink.length
-        ? ([0, 1, 2].map(c => median(ink.map(p => p[c]))) as RGB)
-        : (bg.reduce((a, b) => a + b) / 3 > 128 ? [0, 0, 0] : [255, 255, 255]);
+    // Letters often have an outline/glow of the opposite brightness. Split the non-background pixels into
+    // darker / lighter than the background: the letter body is the bigger group, the other is the outline.
+    const lum = (p: RGB) => 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+    const bgLum = lum(bg);
+    const far = inner.filter(p => dist(p, bg) > 60);
+    const dark = far.filter(p => lum(p) < bgLum);
+    const light = far.filter(p => lum(p) >= bgLum);
+    const [body, edge] = dark.length >= light.length ? [dark, light] : [light, dark];
+    const medianOf = (ps: RGB[]) => [0, 1, 2].map(c => median(ps.map(p => p[c]))) as RGB;
+    const textColor: RGB = body.length ? medianOf(body) : (bgLum > 128 ? [0, 0, 0] : [255, 255, 255]);
+    const outline: RGB | null = edge.length > body.length * 0.15 ? medianOf(edge) : null;
 
-    const background: TextStyle['background'] = nearShare >= 0.9 ? 'flat' : nearShare >= 0.5 && inkShare < 0.35 ? 'gradient' : 'art';
+    // "flat" = truly uniform (instant letter fill). Anything less — including see-through panels that look
+    // white but have artwork behind them — goes to LaMa, which handles both cleanly.
+    const background: TextStyle['background'] = nearShare >= 0.85 ? 'flat' : nearShare >= 0.4 && inkShare < 0.35 ? 'gradient' : 'art';
 
     return {
         textColor: hex(textColor),
-        outlineColor: null,
+        outlineColor: outline ? hex(outline) : null,
         glow: false,
         bold: false,
         align: 'center',
