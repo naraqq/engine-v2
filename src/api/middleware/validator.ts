@@ -6,6 +6,13 @@ import { Errors } from './error-handler.js';
  * Validation schemas
  */
 export const schemas = {
+    trendingDownloadRequest: z.object({
+        sourceId: z.string().min(1).default('asurascans'),
+        titleLimit: z.coerce.number().int().positive().max(10).default(10),
+        chapterLimit: z.coerce.number().int().positive().max(5).default(5),
+        format: z.enum(['cbz', 'images']).default('cbz'),
+        downloadPath: z.string().min(1).optional(),
+    }),
     // Download request
     downloadRequest: z.object({
         sourceId: z.string().min(1, 'Source ID is required'),

@@ -5,6 +5,12 @@ import { validate, schemas } from '../middleware/validator.js';
 
 const router = Router();
 
+router.post(
+    '/trending',
+    validate(schemas.trendingDownloadRequest, 'body'),
+    asyncHandler(downloadsController.createTrendingDownloads)
+);
+
 /**
  * POST /api/v1/downloads
  * Create new download request

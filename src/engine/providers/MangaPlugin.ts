@@ -34,6 +34,10 @@ export abstract class MangaScraper extends MediaScraper<MangaPlugin> {
     public abstract FetchImage(page: Page, priority: Priority, signal: AbortSignal): Promise<Blob>;
 }
 
+export interface TrendingMangaScraper {
+    FetchTrendingMangas(provider: MangaPlugin, limit: number): Promise<Manga[]>;
+}
+
 /**
  * An empty implementation of the `MangaScraper` class.
  * Since decorators do not (yet) work well with the abstract classes, this base class can be used when applying the decorator pattern to customize manga scrapers.
@@ -97,6 +101,15 @@ export class MangaPlugin extends MediaContainer<Manga> {
     public async Initialize(): Promise<void> {
         await this.scraper.Initialize();
         return super.Initialize();
+    }
+
+    public async FetchTrending(limit = 10): Promise<Manga[]> {
+        const scraper = this.scraper as MangaScraper & Partial<TrendingMangaScraper>;
+        if (!scraper.FetchTrendingMangas) {
+            throw new NotImplementedError();
+        }
+        await this.Initialize();
+        return scraper.FetchTrendingMangas(this, limit);
     }
 
     public override CreateEntry(identifier: string, title: string): Manga {

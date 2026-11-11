@@ -271,6 +271,27 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/v1/downloads/trending:
+    post:
+      summary: Queue trending manga and their newest chapters
+      description: Queues at most 10 trending titles and at most 5 newest chapters per title.
+      tags: [Downloads]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TrendingDownloadRequest'
+      responses:
+        '202':
+          description: Trending downloads queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
   /api/v1/downloads/{downloadId}/file:
     get:
       summary: Download file
@@ -618,6 +639,29 @@ components:
         fileUrl:
           type: string
           format: uri
+
+    TrendingDownloadRequest:
+      type: object
+      properties:
+        sourceId:
+          type: string
+          default: asurascans
+        titleLimit:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 10
+        chapterLimit:
+          type: integer
+          minimum: 1
+          maximum: 5
+          default: 5
+        format:
+          type: string
+          enum: [cbz, images]
+          default: cbz
+        downloadPath:
+          type: string
           example: /api/v1/downloads/123e4567-e89b-12d3-a456-426614174000/file
 
   responses:

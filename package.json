@@ -10,12 +10,13 @@
     },
     "main": "dist/index.js",
     "scripts": {
-        "dev": "NODE_OPTIONS='--loader ./loader.mjs' tsx watch src/index.ts",
+        "dev": "node --loader ./loader.mjs --import tsx --watch src/index.ts",
         "build": "tsc && tsc-alias",
         "build:prod": "tsc --project tsconfig.prod.json && tsc-alias",
         "start": "node dist/index.js",
         "lint": "eslint src --ext .ts",
         "test": "vitest run",
+        "download": "node ./scripts/download-trending.mjs",
         "translate": "tsx src/translator/cli.ts",
         "update-website-index": "node ./scripts/website-index.mjs"
     },

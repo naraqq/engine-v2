@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import { downloadService } from '../services/download.service.js';
-import type { ApiResponse, DownloadRequest, DownloadStatus } from '../types/responses.js';
+import type { ApiResponse, DownloadRequest, DownloadStatus, TrendingDownloadRequest, TrendingDownloadResult } from '../types/responses.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import archiver from 'archiver';
@@ -19,6 +19,12 @@ export async function createDownload(req: Request, res: Response): Promise<void>
     };
 
     res.status(201).json(response);
+}
+
+export async function createTrendingDownloads(req: Request, res: Response): Promise<void> {
+    const result = await downloadService.createTrendingDownloads(req.body as TrendingDownloadRequest);
+    const response: ApiResponse<TrendingDownloadResult> = { success: true, data: result };
+    res.status(202).json(response);
 }
 
 /**

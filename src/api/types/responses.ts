@@ -42,7 +42,23 @@ export interface DownloadRequest {
     options?: {
         quality?: 'low' | 'medium' | 'high';
         includeMetadata?: boolean;
+        sequentialChapterNames?: boolean;
     };
+}
+
+export interface TrendingDownloadRequest {
+    sourceId?: string;
+    titleLimit?: number;
+    chapterLimit?: number;
+    format?: 'cbz' | 'images';
+    downloadPath?: string;
+}
+
+export interface TrendingDownloadResult {
+    sourceId: string;
+    titleLimit: number;
+    chapterLimit: number;
+    downloads: DownloadStatus[];
 }
 
 /**

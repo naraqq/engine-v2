@@ -207,6 +207,26 @@ class EngineService {
         }
     }
 
+    public async listTrendingManga(sourceId: string, limit = 10): Promise<MangaInfo[]> {
+        const plugin = this.getEngine().PluginController.WebsitePlugins.find(
+            (p: any) => p.Identifier === sourceId
+        );
+        if (!plugin) throw Errors.SourceNotFound(sourceId);
+
+        try {
+            const mangas = await (plugin as any).FetchTrending(limit);
+            for (const manga of mangas) {
+                if (!plugin.Entries.Value.some((entry: any) => entry.Identifier === manga.Identifier)) {
+                    plugin.Entries.Value.push(manga);
+                }
+            }
+            return mangas.map((manga: any) => this.mapMangaToInfo(manga, sourceId));
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw Errors.InternalError(`Source does not support trending manga: ${message}`);
+        }
+    }
+
     /**
      * Get manga details
      */

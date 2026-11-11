@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import { promises as fs } from 'fs';
 import path from 'path';
-import type { DownloadRequest, DownloadStatus } from '../types/responses.js';
+import type { DownloadRequest, DownloadStatus, TrendingDownloadRequest, TrendingDownloadResult } from '../types/responses.js';
 import { engineService } from './engine.service.js';
 import { config } from '../../config/settings.js';
 import { Errors } from '../middleware/error-handler.js';
@@ -17,6 +17,7 @@ import { Priority } from '../../engine/taskpool/TaskPool.js';
 class DownloadService {
     private downloads = new Map<string, DownloadStatus>();
     private downloadDir = config.storage.downloads;
+    private sequentialQueue: Promise<void> = Promise.resolve();
 
     constructor() {
         this.ensureDownloadDirectory();
@@ -32,7 +33,7 @@ class DownloadService {
     /**
      * Create a new download
      */
-    public async createDownload(request: DownloadRequest): Promise<DownloadStatus> {
+    public async createDownload(request: DownloadRequest, sequential = false): Promise<DownloadStatus> {
         const downloadId = randomUUID();
 
         // Validate and prepare custom download path if provided
@@ -68,8 +69,7 @@ class DownloadService {
 
         this.downloads.set(downloadId, status);
 
-        // Start download asynchronously
-        this.processDownload(downloadId, request, downloadPath).catch((error) => {
+        const run = () => this.processDownload(downloadId, request, downloadPath).catch((error) => {
             logger.error(`Download ${downloadId} failed:`, error);
             this.updateDownloadStatus(downloadId, {
                 status: 'failed',
@@ -77,7 +77,40 @@ class DownloadService {
             });
         });
 
+        // Trending batches run one title at a time. Normal API downloads remain immediate.
+        if (sequential) {
+            this.sequentialQueue = this.sequentialQueue.then(run, run);
+        } else {
+            void run();
+        }
+
         return status;
+    }
+
+    public async createTrendingDownloads(request: TrendingDownloadRequest): Promise<TrendingDownloadResult> {
+        const sourceId = request.sourceId || 'asurascans';
+        const titleLimit = Math.min(request.titleLimit || 10, 10);
+        const chapterLimit = Math.min(request.chapterLimit || 5, 5);
+        const titles = await engineService.listTrendingManga(sourceId, titleLimit);
+        // FetchTrending initializes the adapter and may update its origin after redirects.
+        const downloads: DownloadStatus[] = [];
+
+        for (const title of titles) {
+            const chapters = await engineService.getChapters(sourceId, title.id);
+            const chapterIds = chapters.slice(0, chapterLimit).map(chapter => chapter.id);
+            if (chapterIds.length === 0) continue;
+
+            downloads.push(await this.createDownload({
+                sourceId,
+                mangaId: title.id,
+                chapterIds,
+                format: request.format || 'cbz',
+                downloadPath: request.downloadPath,
+                options: { sequentialChapterNames: true },
+            }, true));
+        }
+
+        return { sourceId, titleLimit, chapterLimit, downloads };
     }
 
     /**
@@ -213,6 +246,7 @@ class DownloadService {
         const storageController = engineService.getStorageController();
         const format = request.format || 'cbz';
 
+        let lastOutputPath = '';
         // Process each chapter
         for (let chapterIndex = 0; chapterIndex < chapters.length; chapterIndex++) {
             const chapter = chapters[chapterIndex];
@@ -269,7 +303,9 @@ class DownloadService {
 
                 // Create export using appropriate exporter
                 // Extract chapter number for clean filename
-                const chapterNumber = this.extractChapterNumber(chapter.Title);
+                const chapterNumber = request.options?.sequentialChapterNames
+                    ? String(chapterIndex + 1)
+                    : this.extractChapterNumber(chapter.Title);
                 // Use clean manga title for folder name instead of manga ID
                 const sanitizedMangaTitle = SanitizeFileName(mangaTitle);
 
@@ -278,12 +314,12 @@ class DownloadService {
 
                 if (format === 'cbz') {
                     // Use clean format: berserk/chapter_1.cbz, berserk/chapter_2.cbz, etc.
-                    const fileName = `chapter_${chapterNumber}.cbz`;
+                    const fileName = `chapter-${chapterNumber}.cbz`;
                     outputPath = path.join(downloadPath, sanitizedMangaTitle, fileName);
                     exporter = new NodeComicBookArchiveExporter(storageController);
                 } else if (format === 'images') {
                     // Use clean format: berserk/chapter_1, berserk/chapter_2, etc.
-                    const dirName = `chapter_${chapterNumber}`;
+                    const dirName = `chapter-${chapterNumber}`;
                     outputPath = path.join(downloadPath, sanitizedMangaTitle, dirName);
                     exporter = new NodeImageDirectoryExporter(storageController);
                 } else {
@@ -304,9 +340,7 @@ class DownloadService {
                     await storageController.RemoveTemporary(...tempKeys);
                 }
 
-                // For now, only download the first chapter
-                // TODO: Support multiple chapters in a single download
-                return outputPath;
+                lastOutputPath = outputPath;
 
             } catch (error) {
                 const errorMessage = error instanceof Error ? error.message : String(error);
@@ -321,7 +355,8 @@ class DownloadService {
             }
         }
 
-        throw new Error('No chapters were successfully downloaded');
+        if (!lastOutputPath) throw new Error('No chapters were successfully downloaded');
+        return lastOutputPath;
     }
 
     /**
@@ -377,8 +412,8 @@ class DownloadService {
             throw Errors.NotFound('Download file');
         }
 
-        // For single chapter downloads, return the first (and only) entry
-        // TODO: For multi-chapter downloads, we might need to zip all chapters together
+        if (entries.length > 1) return mangaDir;
+
         const entry = entries[0];
         const filePath = path.join(mangaDir, entry.name);
 
@@ -396,7 +431,12 @@ class DownloadService {
         if (download.status === 'completed') {
             try {
                 const filePath = await this.getDownloadFilePath(downloadId);
-                await fs.unlink(filePath);
+                const stats = await fs.stat(filePath);
+                if (stats.isDirectory()) {
+                    await fs.rm(filePath, { recursive: true, force: true });
+                } else {
+                    await fs.unlink(filePath);
+                }
             } catch (error) {
                 logger.warn(`Failed to delete file for download ${downloadId}:`, error);
             }

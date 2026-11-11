@@ -135,6 +135,16 @@ Content-Type: application/json
 GET /api/v1/downloads/{downloadId}
 ```
 
+#### Download Trending Titles
+
+Queues up to 10 trending titles and the newest 5 chapters as ordinary image folders:
+
+```bash
+npm run download -- asurascans
+```
+
+Replace `asurascans` with another website ID whose adapter supports trending titles.
+
 #### Download Completed File
 ```bash
 GET /api/v1/downloads/{downloadId}/file
