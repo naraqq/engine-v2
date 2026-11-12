@@ -10,6 +10,10 @@ import path from 'node:path';
 import { copyFileSync, mkdirSync, readdirSync } from 'node:fs';
 import sharp from 'sharp';
 
+// sharp's cache keeps input files open, and Windows can't delete open files
+// (EPERM when the incoming folder is removed afterwards).
+sharp.cache(false);
+
 const IMAGE = /\.(webp|png|jpe?g)$/i;
 /** Wanted page height. The renderer's canvas and WebP (16383 px) both cap the size. */
 const TARGET = 6000;

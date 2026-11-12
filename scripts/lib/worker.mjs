@@ -325,6 +325,20 @@ async function rankWithGemini(entries, montoon, apiKey) {
 /** Each job downloads into its own empty folder, so nothing from an earlier try can be mistaken for it. */
 const INCOMING = path.join(path.dirname(DIRS.downloads), 'incoming');
 
+/**
+ * Deletes a temporary folder without ever failing the job. Windows refuses
+ * while a file inside is still open (antivirus, image cache); retry briefly,
+ * then leave it. A leftover folder is harmless: the next try of that job
+ * empties it first, and a download always lands in a fresh one.
+ */
+function removeQuietly(dir) {
+    try {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+    } catch (error) {
+        log(c.yellow(`  ⚠ Could not remove ${dir} (${error.code || error.message}). Leaving it.`));
+    }
+}
+
 /** The chapter folder the engine wrote inside a job's incoming folder: <series>/chapter-<n>. */
 function findIncomingChapter(root, number) {
     for (const series of existsSync(root) ? readdirSync(root) : []) {
@@ -407,7 +421,7 @@ async function processJob(job) {
         // 1. Download.
         await ensureServer();
         const incoming = path.join(INCOMING, String(job.id));
-        rmSync(incoming, { recursive: true, force: true });
+        removeQuietly(incoming);
         const download = await api('POST', '/api/v1/downloads', {
             sourceId: p.source_id,
             mangaUrl: p.series_url,
@@ -420,7 +434,7 @@ async function processJob(job) {
         const found = findIncomingChapter(incoming, p.chapter_number);
         if (!found) throw new Error(`Downloaded, but no chapter folder was written under ${incoming}.`);
         const dir = await placeChapter(found);
-        rmSync(incoming, { recursive: true, force: true });
+        removeQuietly(incoming);
         const series = found.series;
         const chapter = found.chapter;
         if (lost) throw new LostJobError('Lease lost while downloading.');
