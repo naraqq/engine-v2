@@ -68,13 +68,33 @@ async function maybePlan(settings, opts) {
 }
 
 async function queueJobs(jobs) {
-    let created = 0, existing = 0;
+    let created = 0, existing = 0, updated = 0;
     for (let i = 0; i < jobs.length; i += 400) {
         const result = (await mt('POST', '/jobs', { jobs: jobs.slice(i, i + 400) })).data;
         created += result.created;
         existing += result.existing;
+        updated += result.updated ?? 0; // older servers don't refresh existing jobs
     }
-    return { created, existing };
+    return { created, existing, updated };
+}
+
+/**
+ * Removes queued jobs the plan no longer wants (episodes Montoon now has, or
+ * jobs from a series link that turned out wrong), for the titles this plan
+ * read successfully. Running, failed and finished jobs are kept.
+ */
+async function pruneJobs(checked) {
+    let removed = 0;
+    try {
+        for (let i = 0; i < checked.length; i += 200) {
+            removed += (await mt('POST', '/jobs/prune', { titles: checked.slice(i, i + 200) })).data.removed;
+        }
+    } catch (error) {
+        log(c.yellow(`  ⚠ Couldn't remove outdated jobs (${error.message}). The Montoon backend may need deploying.`));
+        return 0;
+    }
+    if (removed) log(c.gray(`  ↳ Removed ${count(removed, 'outdated queued job')}.`));
+    return removed;
 }
 
 const chapterJob = ({ site, url, chapter, title, contentId = null, workerTitleId = null, priority, reason }) => ({
@@ -120,9 +140,14 @@ function episodePriority(title, titles, position) {
 /** New episodes of Montoon's own titles: the --montoon check, queued. */
 async function planEpisodes() {
     log(c.cyan('▶ Checking Montoon titles for new episodes'));
+    const checked = [];
     const totals = await syncMontoon({
         from: EPISODE_SITES,
         format: 'images',
+        onChecked: ({ title, site, chapters }) => checked.push({
+            content_id: title.id,
+            keep: chapters.map(chapter => `${site.id}:${chapter.id}`),
+        }),
         enqueue: ({ title, titles, site, url, chapters }) => queueJobs(chapters.map((chapter, position) => chapterJob({
             site, url, chapter,
             title: title.title || title.title_mn,
@@ -131,6 +156,7 @@ async function planEpisodes() {
             reason: 'new episode',
         }))),
     }, DIRS.downloads);
+    const removed = await pruneJobs(checked);
     if (totals.notFoundTitles.length) log(c.yellow(`  Not on ${EPISODE_SITES}: ${totals.notFoundTitles.join(', ')}`));
     if (totals.failedTitles.length) log(c.yellow(`  Couldn't check (retried next plan): ${totals.failedTitles.join(', ')}`));
     return {
@@ -138,6 +164,7 @@ async function planEpisodes() {
         episodes: totals.pending,
         not_found: totals.notFound,
         failed: totals.failed,
+        removed_jobs: removed,
         not_found_titles: totals.notFoundTitles,
         failed_titles: totals.failedTitles,
     };

@@ -322,6 +322,8 @@ export async function syncMontoon(opts, outDir) {
                 const newest = numbered.length ? Math.max(...numbered.map(ch => ch.number)) : null;
                 const fresh = numbered.filter(ch => ch.number > have).sort((a, b) => a.number - b.number);
                 say(c.gray(`  ↳ ${target.site.title} has ${chapters.length} chapters${newest !== null ? `, newest is ${newest}` : ''}.`));
+                // The title was read successfully: tell the caller what it wants now.
+                opts.onChecked?.({ title: t, site: target.site, chapters: fresh });
 
                 if (!fresh.length) {
                     say(c.green('  ✓ Up to date.'));
@@ -339,7 +341,7 @@ export async function syncMontoon(opts, outDir) {
                 // Worker mode: queue them for whichever worker is free.
                 if (opts.enqueue) {
                     const queued = await opts.enqueue({ title: t, titles, site: target.site, url: target.url, chapters: fresh });
-                    say(c.cyan(`  ⇢ Queued ${count(queued.created, 'job')}`) + (queued.existing ? c.gray(` (${queued.existing} already queued earlier)`) : ''));
+                    say(c.cyan(`  ⇢ Queued ${count(queued.created, 'job')}`) + (queued.existing ? c.gray(` (${queued.existing} already queued earlier${queued.updated ? `, ${queued.updated} reprioritised` : ''})`) : ''));
                     totals.pending += fresh.length;
                     totals.updated++;
                     continue;
