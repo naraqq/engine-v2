@@ -62,12 +62,21 @@ export async function fetchMontoonTitles({ base, token }, query = '') {
  * A site can list the same name twice (re-uploads); the caller tries each.
  */
 export async function findOnSource(source, title) {
-    const results = await api('GET', `/api/v1/sources/${source.id}/search?q=${encodeURIComponent(title)}&limit=50`);
     const wanted = normalize(title);
-    return {
-        matches: results.filter(r => normalize(r.title) === wanted),
-        candidates: results.slice(0, 3).map(r => r.title),
-    };
+    // Some site searches (manga18fx) return nothing when the query has an
+    // apostrophe or hyphen ("Duke's", "Auto-Hunting"). Try the title as is,
+    // then without punctuation, then its first words. Only an exact title
+    // match counts, so a looser query can't pick the wrong series.
+    const plain = title.replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    const queries = [...new Set([title, plain, plain.split(' ').slice(0, 3).join(' ')])].filter(q => q.length >= 3);
+    let first = null;
+    for (const query of queries) {
+        const results = await api('GET', `/api/v1/sources/${source.id}/search?q=${encodeURIComponent(query)}&limit=50`);
+        first ??= results.length ? results : null;
+        const matches = results.filter(r => normalize(r.title) === wanted);
+        if (matches.length) return { matches, candidates: [] };
+    }
+    return { matches: [], candidates: (first ?? []).slice(0, 3).map(r => r.title) };
 }
 
 /** --link <montoon id> <url> and --unlink <montoon id>. */

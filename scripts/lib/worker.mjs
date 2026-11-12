@@ -113,12 +113,13 @@ const chapterJob = ({ site, url, chapter, title, contentId = null, workerTitleId
 });
 
 /**
- * A title's readership, once Montoon's sync API sends it (reads in the last
- * 7 days preferred). null while it doesn't.
+ * A title's readership from Montoon's sync feed: unique readers in the last
+ * 7 days, plus a little of the last 30 so a quiet week doesn't sink a title
+ * people follow. null from an older server that doesn't send it.
  */
 const readsOf = t => {
-    const value = t.reads_7d ?? t.reads_30d ?? t.reads ?? t.views_7d ?? t.views;
-    return Number.isFinite(Number(value)) ? Number(value) : null;
+    if (t.readers_7d === undefined && t.readers_30d === undefined) return null;
+    return (Number(t.readers_7d) || 0) + (Number(t.readers_30d) || 0) / 4;
 };
 
 /**
