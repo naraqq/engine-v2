@@ -1,3 +1,4 @@
+import sharp from 'sharp';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { config } from '../config/settings.js';
@@ -5,7 +6,7 @@ import { logger } from '../config/logger.js';
 import { detectPage, toTextLines } from './detect.js';
 import { renderPage } from './render.js';
 import { loadGlossary, needsWork, polishRegions, saveGlossary, translateRegions } from './translate.js';
-import type { PageResult } from './types.js';
+import type { PageResult, Region } from './types.js';
 
 const IMAGE_EXT = /\.(webp|png|jpe?g)$/i;
 
@@ -30,18 +31,23 @@ export const listChapters = (series: string) => listDirs(path.join(config.storag
 
 /**
  * Phase 1 for one chapter:
- *  1. local OCR (GPU) reads every page — no images leave the machine;
- *  2. one text-only Gemini pass classifies the blocks, fixes OCR errors and translates.
- * Results go to translations/<series>/<chapter>/<page>.json, mirroring the downloads folder layout.
+ *  1. local OCR (GPU) reads every page;
+ *  2. one Gemini pass classifies the blocks, fixes OCR errors and translates; with
+ *     TRANSLATOR_VISION on (default) it also gets a small crop of each likely text block.
+ * Translated pages go to translations/<series>/<chapter>/ (images only, ready to upload); the
+ * per-page OCR/translation data and the series glossary live in translation-work/<series>/.
  */
 export async function processChapter(series: string, chapter: string, opts: ChapterOptions = {}): Promise<void> {
     const srcDir = path.join(config.storage.downloads, series, chapter);
     const seriesOut = path.join(config.storage.translations, series);
     const outDir = path.join(seriesOut, chapter);
+    const seriesWork = path.join(config.storage.translationWork, series);
+    const workDir = path.join(seriesWork, chapter);
     await fs.mkdir(outDir, { recursive: true });
+    await fs.mkdir(workDir, { recursive: true });
 
     const files = (await fs.readdir(srcDir)).filter(f => IMAGE_EXT.test(f)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-    const jsonPath = (file: string) => path.join(outDir, file.replace(IMAGE_EXT, '.json'));
+    const jsonPath = (file: string) => path.join(workDir, file.replace(IMAGE_EXT, '.json'));
     const pages: PageResult[] = [];
 
     // 1. Local OCR, one page at a time (the GPU session is shared). Cached pages are reused.
@@ -89,11 +95,12 @@ export async function processChapter(series: string, chapter: string, opts: Chap
     if (pending.length === 0) {
         logger.info(`[${series}/${chapter}] already translated`);
     } else {
-        const glossary = await loadGlossary(seriesOut);
+        const glossary = await loadGlossary(seriesWork);
         const widths = new Map(pages.map(p => [p.source, p.width]));
-        logger.info(`[${series}/${chapter}] translating ${pending.length} blocks (glossary: ${glossary.terms.length} terms)`);
-        await translateRegions(pending, widths, glossary);
-        await saveGlossary(seriesOut, glossary);
+        logger.info(`[${series}/${chapter}] translating ${pending.length} blocks with ${config.translator.translateModel}${config.translator.vision ? ' + bubble crops' : ''} (glossary: ${glossary.terms.length} terms)`);
+        const crop = config.translator.vision ? cropper(new Map(pages.map((p, i) => [p.source, path.join(srcDir, files[i])]))) : undefined;
+        await translateRegions(pending, widths, glossary, undefined, crop);
+        await saveGlossary(seriesWork, glossary);
         if (config.translator.polish) {
             const changed = await polishRegions(pending);
             logger.info(`[${series}/${chapter}] polish pass rewrote ${changed} lines`);
@@ -128,4 +135,36 @@ export async function processChapter(series: string, chapter: string, opts: Chap
         await fs.writeFile(jsonPath(file), JSON.stringify(pages[i], null, 2) + '\n', 'utf8');
     }
     logger.info(`[${series}/${chapter}] done → ${outDir}`);
+}
+
+/**
+ * Crops a region (plus a margin) out of its original page as a small JPEG for the
+ * translation model. Each page is decoded once and kept while its regions are cut.
+ */
+function cropper(pageFiles: Map<string, string>) {
+    let current: { id: string; data: Buffer; width: number; height: number; channels: 1 | 2 | 3 | 4 } | null = null;
+    return async (r: Region): Promise<Buffer | null> => {
+        const id = r.id.split('#')[0];
+        const file = pageFiles.get(id);
+        if (!file) {
+            return null;
+        }
+        if (current?.id !== id) {
+            const { data, info } = await sharp(file).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+            current = { id, data, width: info.width, height: info.height, channels: info.channels };
+        }
+        const pad = Math.round(Math.max(16, Math.min(r.box.w, r.box.h) * 0.3));
+        const left = Math.max(0, r.box.x - pad);
+        const top = Math.max(0, r.box.y - pad);
+        const width = Math.min(current.width - left, r.box.w + pad * 2);
+        const height = Math.min(current.height - top, r.box.h + pad * 2);
+        if (width < 8 || height < 8) {
+            return null;
+        }
+        return sharp(current.data, { raw: { width: current.width, height: current.height, channels: current.channels } })
+            .extract({ left, top, width, height })
+            .resize({ width: 512, height: 512, fit: 'inside', withoutEnlargement: true })
+            .jpeg({ quality: 80 })
+            .toBuffer();
+    };
 }

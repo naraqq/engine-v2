@@ -40,14 +40,19 @@ export const config = {
         temp: path.join(process.env.STORAGE_PATH || path.join(__dirname, '../../storage'), 'temp'),
         database: path.join(process.env.STORAGE_PATH || path.join(__dirname, '../../storage'), 'database'),
         cache: path.join(process.env.STORAGE_PATH || path.join(__dirname, '../../storage'), 'cache'),
+        /** Finished translated pages only (what gets uploaded). */
         translations: path.join(process.env.STORAGE_PATH || path.join(__dirname, '../../storage'), 'translations'),
+        /** Translator working data: per-page OCR/translation JSON (lets re-runs skip OCR) and per-series glossaries. */
+        translationWork: path.join(process.env.STORAGE_PATH || path.join(__dirname, '../../storage'), 'translation-work'),
     },
 
     // Manga translator (Gemini)
     translator: {
         apiKey: process.env.GEMINI_API_KEY,
         /** Translation model: a Gemini model name, or a claude-* model (needs ANTHROPIC_API_KEY). */
-        translateModel: process.env.TRANSLATE_MODEL || process.env.GEMINI_TRANSLATE_MODEL || 'gemini-3.5-flash-lite',
+        translateModel: process.env.TRANSLATE_MODEL || process.env.GEMINI_TRANSLATE_MODEL || 'gemini-3.5-flash',
+        /** Send a crop of each likely text block with the OCR text, so the model reads the real lettering and sees the scene (TRANSLATOR_VISION=false: text only). */
+        vision: process.env.TRANSLATOR_VISION !== 'false',
         anthropicApiKey: process.env.ANTHROPIC_API_KEY,
         /** Claude thinking depth: low | medium | high. */
         claudeEffort: process.env.CLAUDE_EFFORT || 'low',
@@ -55,7 +60,8 @@ export const config = {
         styleFile: process.env.TRANSLATOR_STYLE || path.join(__dirname, '../../assets/translation/style.json'),
         /** Run the native-editor polish pass after translating (set TRANSLATOR_POLISH=false to skip). */
         polish: process.env.TRANSLATOR_POLISH !== 'false',
-        thinkingBudget: parseInt(process.env.GEMINI_THINKING_BUDGET || '256', 10),
+        /** Gemini thinking tokens per call; never more than 256 (cost cap), whatever .env says. */
+        thinkingBudget: Math.min(Math.max(parseInt(process.env.GEMINI_THINKING_BUDGET || '256', 10) || 0, 0), 256),
         /** Local OCR runs on the GPU via DirectML ("dml"); "cpu" works everywhere but ~2.5x slower. */
         ocrProvider: process.env.OCR_PROVIDER || 'dml',
         /** Zoom levels OCR reads each tile at; 2x/3x are needed for small or stylised system-window lettering. */

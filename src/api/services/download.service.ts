@@ -97,7 +97,10 @@ class DownloadService {
 
         for (const title of titles) {
             const chapters = await engineService.getChapters(sourceId, title.id);
-            const chapterIds = chapters.slice(0, chapterLimit).map(chapter => chapter.id);
+            // A trending title is a new series to start, so take its first
+            // chapters (the list is newest first) and keep their real numbers:
+            // folder chapter-1 holds episode 1.
+            const chapterIds = chapters.slice(-chapterLimit).map(chapter => chapter.id);
             if (chapterIds.length === 0) continue;
 
             downloads.push(await this.createDownload({
@@ -106,7 +109,6 @@ class DownloadService {
                 chapterIds,
                 format: request.format || 'cbz',
                 downloadPath: request.downloadPath,
-                options: { sequentialChapterNames: true },
             }, true));
         }
 
@@ -172,9 +174,11 @@ class DownloadService {
             logger.debug('Available chapter IDs:', chapters.Value.map((c: any) => c.Identifier));
             logger.debug('Requested chapter IDs:', request.chapterIds);
 
+            // Sources list chapters newest first; download (and number, with
+            // sequentialChapterNames) in reading order, oldest first.
             const chaptersToDownload = chapters.Value.filter((c: any) =>
                 request.chapterIds.includes(c.Identifier)
-            );
+            ).reverse();
 
             if (chaptersToDownload.length === 0) {
                 const availableChapterIds = chapters.Value.map((c: any) => c.Identifier).join(', ');
@@ -217,6 +221,20 @@ class DownloadService {
      * "Chapter 42.5" -> "42.5"
      * "Vol.1 Chapter 3" -> "3"
      */
+    /** One page image, retried with backoff so a single timeout doesn't sink the chapter. */
+    private async fetchPageWithRetry(page: any, attempts = 3): Promise<Blob> {
+        for (let attempt = 1; ; attempt++) {
+            try {
+                return await page.Fetch(Priority.Normal, new AbortController().signal);
+            } catch (error) {
+                if (attempt >= attempts) throw error;
+                const message = error instanceof Error ? error.message : String(error);
+                logger.warn(`Page fetch failed (attempt ${attempt}/${attempts}), retrying: ${message}`);
+                await new Promise(resolve => setTimeout(resolve, 1500 * attempt));
+            }
+        }
+    }
+
     private extractChapterNumber(chapterTitle: string): string {
         // Try to find chapter number patterns
         const patterns = [
@@ -275,7 +293,7 @@ class DownloadService {
                     const page = pages[pageIndex];
                     try {
                         logger.debug(`Fetching page ${pageIndex + 1}/${pages.length}: ${page.Link?.href}`);
-                        const imageBlob = await page.Fetch(Priority.Normal, new AbortController().signal);
+                        const imageBlob = await this.fetchPageWithRetry(page);
                         logger.debug(`Received blob: type=${imageBlob?.type}, size=${imageBlob?.size}`);
 
                         const tempKey = await storageController.SaveTemporary(imageBlob);

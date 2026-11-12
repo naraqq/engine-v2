@@ -2,7 +2,11 @@
   "compilerOptions": {
     "target": "ES2022",
     "module": "ES2022",
-    "lib": ["ES2022", "DOM"],
+    "lib": [
+      "ESNext",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "moduleResolution": "node",
     "resolveJsonModule": true,
     "allowJs": true,
@@ -25,9 +29,15 @@
     "emitDecoratorMetadata": true,
     "noEmitOnError": false,
     "paths": {
-      "@engine/*": ["./src/engine/*"],
-      "@api/*": ["./src/api/*"],
-      "@config/*": ["./src/config/*"]
+      "@engine/*": [
+        "./src/engine/*"
+      ],
+      "@api/*": [
+        "./src/api/*"
+      ],
+      "@config/*": [
+        "./src/config/*"
+      ]
     }
   },
   "include": [
@@ -41,5 +51,8 @@
     "**/*.test.ts",
     "**/*_e2e.ts",
     "test"
-  ]
+  ],
+  "tsc-alias": {
+    "resolveFullPaths": true
+  }
 }

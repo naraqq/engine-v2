@@ -41,5 +41,5 @@ declare module '*.proto?raw' {
 
 // Protobuf/JSON types
 type JSONElement = string | number | boolean | null | JSONObject | JSONArray;
-type JSONObject = { [key: string]: JSONElement };
-type JSONArray = JSONElement[];
+type JSONObject<T = JSONElement> = { [key: string]: T };
+type JSONArray<T = JSONElement> = T[];

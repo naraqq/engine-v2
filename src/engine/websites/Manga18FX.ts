@@ -1,6 +1,7 @@
 import { Tags } from '../Tags';
 import icon from './Manga18FX.webp';
-import { DecoratableMangaScraper } from '../providers/MangaPlugin';
+import { FetchCSS } from '../platform/FetchProvider';
+import { DecoratableMangaScraper, Manga, type MangaPlugin } from '../providers/MangaPlugin';
 import * as Madara from './decorators/WordPressMadara';
 import * as Common from './decorators/Common';
 
@@ -17,5 +18,18 @@ export default class extends DecoratableMangaScraper {
 
     public override get Icon() {
         return icon;
+    }
+
+    /** The site's own search (/search?q=), instead of crawling every catalog page. */
+    public async SearchMangas(provider: MangaPlugin, query: string): Promise<Manga[]> {
+        const url = new URL('/search', this.URI);
+        url.searchParams.set('q', query);
+        const anchors = await FetchCSS<HTMLAnchorElement>(new Request(url), 'a[href^="/manga/"][title]');
+        const seen = new Set<string>();
+        return anchors
+            .map(anchor => ({ slug: new URL(anchor.getAttribute('href'), this.URI).pathname.replace(/\/$/, ''), title: anchor.title.trim() }))
+            .filter(({ slug, title }) => /^\/manga\/[^/]+$/.test(slug) && title && !seen.has(slug) && seen.add(slug))
+            // Same identifier shape as the rest of this (Madara) connector.
+            .map(({ slug, title }) => new Manga(this, provider, JSON.stringify({ post: '', slug }), title));
     }
 }

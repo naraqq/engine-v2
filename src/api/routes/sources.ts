@@ -37,6 +37,16 @@ router.get(
 );
 
 /**
+ * GET /api/v1/sources/:sourceId/discover?list=trending|latest
+ * Series the site promotes: trending now, or updated most recently
+ */
+router.get(
+    '/:sourceId/discover',
+    validate(schemas.sourceIdParam, 'params'),
+    asyncHandler(sourcesController.discover)
+);
+
+/**
  * GET /api/v1/sources/:sourceId/manga
  * List all manga from source (paginated)
  */

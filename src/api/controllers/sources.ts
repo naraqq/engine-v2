@@ -139,6 +139,17 @@ export async function getManga(req: Request, res: Response): Promise<void> {
 }
 
 /**
+ * Discovery list of a source: ?list=trending|latest&limit=20
+ */
+export async function discover(req: Request, res: Response): Promise<void> {
+    const { sourceId } = req.params;
+    const list = String(req.query.list || 'trending');
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit || '20'), 10) || 20, 1), 50);
+    const mangas = await engineService.discoverManga(sourceId, list, limit);
+    res.json({ success: true, data: mangas, meta: { list, total: mangas.length } });
+}
+
+/**
  * Get manga chapters
  */
 export async function getChapters(req: Request, res: Response): Promise<void> {

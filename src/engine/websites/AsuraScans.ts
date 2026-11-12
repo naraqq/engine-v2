@@ -13,15 +13,23 @@ const excludes = [
     /EndDesignPSD/i
 ];
 
+// Chapter link text now runs the number into the release date
+// ("Chapter 1271 day ago"), and a "First Chapter" button links to chapter 1,
+// so take the number from the URL instead. Only this series' chapters count;
+// newest first, like the site.
 const chapterScript = `
     new Promise( resolve => {
-        const seen = new Set();
-        resolve( [...document.querySelectorAll('a[href*="/chapter/"]')].map(chapter => {
-            return {
-                id: chapter.pathname,
-                title: (chapter.querySelector('h2, h3, h4')?.textContent || chapter.textContent).replace('\\n', ' ').trim()
-            };
-        }).filter(chapter => !seen.has(chapter.id) && seen.add(chapter.id)));
+        const base = location.pathname.replace(/\\/$/, '') + '/chapter/';
+        const chapters = new Map();
+        for (const link of document.querySelectorAll('a[href*="/chapter/"]')) {
+            const path = link.pathname.replace(/\\/$/, '');
+            const match = path.startsWith(base) && path.slice(base.length).match(/^(\\d+(?:\\.\\d+)?)$/);
+            if (!match || chapters.has(path)) continue;
+            chapters.set(path, { id: path, title: 'Chapter ' + match[1], number: parseFloat(match[1]) });
+        }
+        resolve([...chapters.values()]
+            .sort((a, b) => b.number - a.number)
+            .map(({ id, title }) => ({ id, title })));
     });
 `;
 
@@ -53,10 +61,24 @@ const trendingScript = `
     });
 `;
 
+const searchScript = `
+    new Promise(resolve => {
+        const seen = new Set();
+        resolve([...document.querySelectorAll('a[href^="/comics/"]')]
+            .filter(anchor => /^\\/comics\\/[^/]+$/.test(anchor.pathname))
+            .map(anchor => ({
+                id: anchor.pathname,
+                title: (anchor.querySelector('img[alt]')?.getAttribute('alt') || anchor.textContent).replace(/\\s+/g, ' ').trim(),
+            }))
+            .filter(entry => entry.title && !seen.has(entry.id) && seen.add(entry.id)));
+    });
+`;
+
 function MangaLinkExtractor(title: HTMLTitleElement, uri: URL) {
     return {
         id: uri.pathname,
-        title: title.innerText.replace(/\s*\|\s*Asura Scans.*$/i, '').trim(),
+        // jsdom (server side) has no innerText.
+        title: (title.textContent ?? '').replace(/\s*\|\s*Asura Scans.*$/i, '').trim(),
     };
 }
 
@@ -75,11 +97,27 @@ function MangaInfoExtractor(anchor: HTMLAnchorElement) {
 export default class extends DecoratableMangaScraper {
 
     public constructor() {
-        super('asurascans', 'Asura Scans', 'https://asuracomic.net', Tags.Media.Manhwa, Tags.Media.Manhua, Tags.Language.English, Tags.Source.Scanlator);
+        super('asurascans', 'Asura Scans', 'https://asurascans.com', Tags.Media.Manhwa, Tags.Media.Manhua, Tags.Language.English, Tags.Source.Scanlator);
     }
 
     public override get Icon() {
         return icon;
+    }
+
+    /** The site's own search (/browse?search=), matching titles and descriptions. */
+    public async SearchMangas(provider: MangaPlugin, query: string): Promise<Manga[]> {
+        const url = new URL('/browse', this.URI);
+        url.searchParams.set('search', query);
+        const entries = await FetchWindowScript<Array<{ id: string; title: string }>>(new Request(url), searchScript, 500);
+        return entries.map(entry => new Manga(this, provider, entry.id, entry.title));
+    }
+
+    /** Series with the newest chapters (/browse?sort=latest), most recent first. */
+    public async FetchLatestMangas(provider: MangaPlugin, limit: number): Promise<Manga[]> {
+        const url = new URL('/browse', this.URI);
+        url.searchParams.set('sort', 'latest');
+        const entries = await FetchWindowScript<Array<{ id: string; title: string }>>(new Request(url), searchScript, 500);
+        return entries.slice(0, limit).map(entry => new Manga(this, provider, entry.id, entry.title));
     }
 
     public async FetchTrendingMangas(provider: MangaPlugin, limit: number): Promise<Manga[]> {

@@ -273,8 +273,8 @@ paths:
 
   /api/v1/downloads/trending:
     post:
-      summary: Queue trending manga and their newest chapters
-      description: Queues at most 10 trending titles and at most 5 newest chapters per title.
+      summary: Queue trending manga and their first chapters
+      description: Queues at most 10 trending titles and their first chapters (at most 5 per title), saved under their real chapter numbers.
       tags: [Downloads]
       requestBody:
         required: false
@@ -571,7 +571,7 @@ components:
           minItems: 1
         format:
           type: string
-          enum: [cbz, pdf, epub, images]
+          enum: [cbz, images]
           default: cbz
         options:
           type: object
@@ -624,7 +624,7 @@ components:
           type: string
         format:
           type: string
-          enum: [cbz, pdf, epub, images]
+          enum: [cbz, images]
         createdAt:
           type: string
           format: date-time

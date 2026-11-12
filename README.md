@@ -7,7 +7,7 @@ A production-grade REST API for downloading manga from 788+ sources with built-i
 ## 🚀 Features
 
 - **788+ Manga Sources**: Support for hundreds of manga websites
-- **Multiple Export Formats**: CBZ, PDF, EPUB, and raw images
+- **Export Formats**: CBZ archives and raw image folders
 - **REST API**: Well-documented RESTful API with OpenAPI/Swagger
 - **Rate Limiting**: Built-in concurrency control and rate limiting
 - **Download Management**: Queue, track, and manage manga downloads
@@ -137,7 +137,7 @@ GET /api/v1/downloads/{downloadId}
 
 #### Download Trending Titles
 
-Queues up to 10 trending titles and the newest 5 chapters as ordinary image folders:
+Queues up to 10 trending titles and their first 5 chapters (named by real chapter number) as image folders:
 
 ```bash
 npm run download -- asurascans

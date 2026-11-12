@@ -38,6 +38,16 @@ export interface TrendingMangaScraper {
     FetchTrendingMangas(provider: MangaPlugin, limit: number): Promise<Manga[]>;
 }
 
+/** A scraper that can list the series updated most recently. */
+export interface LatestMangaScraper {
+    FetchLatestMangas(provider: MangaPlugin, limit: number): Promise<Manga[]>;
+}
+
+/** A scraper that can ask the site's own search instead of crawling its catalog. */
+export interface SearchableMangaScraper {
+    SearchMangas(provider: MangaPlugin, query: string): Promise<Manga[]>;
+}
+
 /**
  * An empty implementation of the `MangaScraper` class.
  * Since decorators do not (yet) work well with the abstract classes, this base class can be used when applying the decorator pattern to customize manga scrapers.
@@ -112,13 +122,37 @@ export class MangaPlugin extends MediaContainer<Manga> {
         return scraper.FetchTrendingMangas(this, limit);
     }
 
+    public async FetchLatest(limit = 20): Promise<Manga[]> {
+        const scraper = this.scraper as MangaScraper & Partial<LatestMangaScraper>;
+        if (!scraper.FetchLatestMangas) {
+            throw new NotImplementedError();
+        }
+        await this.Initialize();
+        return scraper.FetchLatestMangas(this, limit);
+    }
+
+    public get SupportsSiteSearch(): boolean {
+        return typeof (this.scraper as Partial<SearchableMangaScraper>).SearchMangas === 'function';
+    }
+
+    public async Search(query: string): Promise<Manga[]> {
+        const scraper = this.scraper as MangaScraper & Partial<SearchableMangaScraper>;
+        if (!scraper.SearchMangas) {
+            throw new NotImplementedError();
+        }
+        await this.Initialize();
+        return scraper.SearchMangas(this, query);
+    }
+
     public override CreateEntry(identifier: string, title: string): Manga {
         return new Manga(this.scraper, this, identifier, title);
     }
 
     public override async TryGetEntry(url: string): Promise<Manga> {
+        // Initialize first (runs once): some sites look up their current
+        // domain there, and the URL check below compares against it.
+        await this.Initialize();
         if(this.scraper.ValidateMangaURL(url)) {
-            await this.Initialize();
             const manga = await this.scraper.FetchManga(this, url);
             return this.Entries.Value.find((entry) => entry.IsSameAs(manga)) ?? manga;
         }

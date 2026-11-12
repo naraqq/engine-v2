@@ -141,7 +141,7 @@ export class FetchProviderPuppeteer extends FetchProvider {
         // Try standard fetch first
         try {
             // Use proxy agent if configured
-            const fetchOptions: RequestInit = this.proxyAgent ? { dispatcher: this.proxyAgent } : {};
+            const fetchOptions = (this.proxyAgent ? { dispatcher: this.proxyAgent } : {}) as RequestInit;
             const response = await fetch(request, fetchOptions);
             await this.ValidateResponse(response);
 
@@ -253,8 +253,11 @@ export class FetchProviderPuppeteer extends FetchProvider {
             // Sanitize headers to remove invalid characters (e.g., newlines in Cloudflare server-timing)
             const sanitizedHeaders = this.sanitizeHeaders(headers);
 
+            // A cached page comes back as 304, but we always return the rendered
+            // HTML, and Response() rejects a body on null-body statuses.
+            const status = [101, 103, 204, 205, 304].includes(response.status()) ? 200 : response.status();
             const responseInit: ResponseInit = {
-                status: response.status(),
+                status,
                 statusText: response.statusText(),
                 headers: sanitizedHeaders,
             };

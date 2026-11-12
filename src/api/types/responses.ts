@@ -37,7 +37,7 @@ export interface DownloadRequest {
     mangaId?: string;
     mangaUrl?: string;
     chapterIds: string[];
-    format?: 'cbz' | 'pdf' | 'epub' | 'images';
+    format?: 'cbz' | 'images';
     downloadPath?: string; // Optional custom download location (absolute path)
     options?: {
         quality?: 'low' | 'medium' | 'high';

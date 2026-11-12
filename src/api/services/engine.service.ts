@@ -91,6 +91,18 @@ class EngineService {
 
         logger.info(`✅ Found plugin: ${plugin.Title} (${sourceId})`);
 
+        // Sites with their own search answer in seconds; crawling the whole
+        // catalog (below) can take minutes on the first query.
+        if (query?.trim() && (plugin as any).SupportsSiteSearch) {
+            try {
+                const found = await (plugin as any).Search(query.trim());
+                logger.info(`✅ Site search returned ${found.length} results`);
+                return found.map((manga: any) => this.mapMangaToInfo(manga, sourceId));
+            } catch (error) {
+                logger.warn('Site search failed, falling back to catalog filtering', error);
+            }
+        }
+
         try {
             // Check if entries are already loaded
             const currentEntries = plugin.Entries.Value;
@@ -207,6 +219,23 @@ class EngineService {
         }
     }
 
+    /** A site's discovery list: 'trending' or 'latest' (recently updated). */
+    public async discoverManga(sourceId: string, list: string, limit = 20): Promise<MangaInfo[]> {
+        if (list === 'trending') return this.listTrendingManga(sourceId, limit);
+        const plugin = this.getEngine().PluginController.WebsitePlugins.find(
+            (p: any) => p.Identifier === sourceId
+        );
+        if (!plugin) throw Errors.SourceNotFound(sourceId);
+        if (list !== 'latest') throw Errors.BadRequest(`Unknown list "${list}". Use trending or latest.`);
+        try {
+            const mangas = await (plugin as any).FetchLatest(limit);
+            return mangas.map((manga: any) => this.mapMangaToInfo(manga, sourceId));
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw Errors.InternalError(`Source does not support the latest list: ${message}`);
+        }
+    }
+
     public async listTrendingManga(sourceId: string, limit = 10): Promise<MangaInfo[]> {
         const plugin = this.getEngine().PluginController.WebsitePlugins.find(
             (p: any) => p.Identifier === sourceId
@@ -217,7 +246,7 @@ class EngineService {
             const mangas = await (plugin as any).FetchTrending(limit);
             for (const manga of mangas) {
                 if (!plugin.Entries.Value.some((entry: any) => entry.Identifier === manga.Identifier)) {
-                    plugin.Entries.Value.push(manga);
+                    (plugin.Entries.Value as unknown[]).push(manga);
                 }
             }
             return mangas.map((manga: any) => this.mapMangaToInfo(manga, sourceId));

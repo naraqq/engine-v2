@@ -44,6 +44,9 @@ export function createApp(): Express {
         },
         standardHeaders: true,
         legacyHeaders: false,
+        // The local `download` command polls and searches far more than 100
+        // times per run; only limit requests from other machines.
+        skip: (req) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.ip ?? ''),
     });
     app.use(limiter);
 

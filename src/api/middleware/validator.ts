@@ -19,7 +19,7 @@ export const schemas = {
         mangaId: z.string().optional(),
         mangaUrl: z.string().url('Must be a valid URL').optional(),
         chapterIds: z.array(z.string()).min(1, 'At least one chapter ID is required'),
-        format: z.enum(['cbz', 'pdf', 'epub', 'images']).default('cbz'),
+        format: z.enum(['cbz', 'images']).default('cbz'),
         downloadPath: z.string().optional().refine(
             (path) => {
                 // If provided, ensure it's a valid path string (basic validation)
