@@ -12,19 +12,33 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { ROOT, api, c, chapterNumber, describeNumbers, ensureServer, fail, follow, normalize, say, sleep, status } from './cli.mjs';
 
+/** This PC's links (found automatically or set with --link). */
 const LINKS_FILE = path.join(ROOT, 'storage', 'montoon-links.json');
+/**
+ * Links kept in git, so every worker PC has them: titles whose name on the
+ * episode site differs from Montoon's. Same shape; this PC's own file wins.
+ */
+const SHARED_LINKS_FILE = path.join(ROOT, 'scripts', 'montoon-links.json');
 
-function loadLinks() {
+function readJson(file) {
     try {
-        return existsSync(LINKS_FILE) ? JSON.parse(readFileSync(LINKS_FILE, 'utf8')) : {};
+        return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
     } catch {
-        fail(`${LINKS_FILE} is not valid JSON. Fix or delete it.`);
+        fail(`${file} is not valid JSON. Fix or delete it.`);
     }
 }
 
+function loadLinks() {
+    return { ...readJson(SHARED_LINKS_FILE), ...readJson(LINKS_FILE) };
+}
+
+/** Saves this PC's links (shared ones stay in the shared file). */
 function saveLinks(links) {
+    const shared = readJson(SHARED_LINKS_FILE);
+    const own = Object.fromEntries(Object.entries(links)
+        .filter(([id, link]) => JSON.stringify(shared[id]) !== JSON.stringify(link)));
     mkdirSync(path.dirname(LINKS_FILE), { recursive: true });
-    writeFileSync(LINKS_FILE, JSON.stringify(links, null, 2) + '\n');
+    writeFileSync(LINKS_FILE, JSON.stringify(own, null, 2) + '\n');
 }
 
 export function montoonConfig() {
