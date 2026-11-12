@@ -51,8 +51,6 @@ export const config = {
         apiKey: process.env.GEMINI_API_KEY,
         /** Translation model: a Gemini model name, or a claude-* model (needs ANTHROPIC_API_KEY). */
         translateModel: process.env.TRANSLATE_MODEL || process.env.GEMINI_TRANSLATE_MODEL || 'gemini-3.5-flash',
-        /** Send a crop of each likely text block with the OCR text, so the model reads the real lettering and sees the scene (TRANSLATOR_VISION=false: text only). */
-        vision: process.env.TRANSLATOR_VISION !== 'false',
         anthropicApiKey: process.env.ANTHROPIC_API_KEY,
         /** Claude thinking depth: low | medium | high. */
         claudeEffort: process.env.CLAUDE_EFFORT || 'low',
@@ -64,7 +62,7 @@ export const config = {
         thinkingBudget: Math.min(Math.max(parseInt(process.env.GEMINI_THINKING_BUDGET || '256', 10) || 0, 0), 256),
         /** Local OCR runs on the GPU via DirectML ("dml"); "cpu" works everywhere but ~2.5x slower. */
         ocrProvider: process.env.OCR_PROVIDER || 'dml',
-        /** Lowest OCR confidence kept. Low readings still mark where text is; the model reads the crop. */
+        /** Lowest OCR confidence kept. Lower readings are dropped; the model only sees the OCR text. */
         ocrMinConfidence: Math.min(Math.max(Number(process.env.OCR_MIN_CONFIDENCE ?? 0.5) || 0, 0), 1),
         /** Zoom levels OCR reads each tile at: 1x finds big shouted lettering, 2x small text. (2,3 was ~1.8x slower and missed big shouts.) */
         ocrScales: (process.env.OCR_SCALES || '1,2').split(',').map(Number).filter(n => n > 0),

@@ -19,11 +19,12 @@
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { ROOT, api, c, chapterNumber, ensureServer, follow, normalize, say, sleep, status } from './cli.mjs';
 import { fetchMontoonTitles, findOnSource, montoonConfig, resultUrl, syncMontoon } from './montoon.mjs';
 import { LostJobError, log, mt } from './montoon-api.mjs';
 import { DIRS, removeLocalChapter, translatedPages, uploadChapter } from './upload.mjs';
+import { stitchChapter } from './stitch.mjs';
 
 const WORKER = (process.env.WORKER_NAME || os.hostname()).replace(/[^\w.-]+/g, '-').slice(0, 56);
 const JOB_TTL = 900; // seconds a claimed job stays ours without a heartbeat
@@ -321,17 +322,35 @@ async function rankWithGemini(entries, montoon, apiKey) {
 
 // ------------------------------------------------------------------- jobs
 
-/** The chapter folder the engine just wrote: storage/downloads/<series>/chapter-<n>. */
-function findChapterDir(number, since) {
-    const name = `chapter-${number}`;
-    let best = null;
-    for (const series of existsSync(DIRS.downloads) ? readdirSync(DIRS.downloads) : []) {
-        const dir = path.join(DIRS.downloads, series, name);
-        if (!existsSync(dir)) continue;
-        const mtime = statSync(dir).mtimeMs;
-        if (!best || mtime > best.mtime) best = { dir, mtime };
+/** Each job downloads into its own empty folder, so nothing from an earlier try can be mistaken for it. */
+const INCOMING = path.join(path.dirname(DIRS.downloads), 'incoming');
+
+/** The chapter folder the engine wrote inside a job's incoming folder: <series>/chapter-<n>. */
+function findIncomingChapter(root, number) {
+    for (const series of existsSync(root) ? readdirSync(root) : []) {
+        const seriesDir = path.join(root, series);
+        if (!statSync(seriesDir).isDirectory()) continue;
+        const exact = path.join(seriesDir, `chapter-${number}`);
+        if (existsSync(exact)) return { series, chapter: `chapter-${number}`, dir: exact };
+        const [only] = readdirSync(seriesDir).filter(d => statSync(path.join(seriesDir, d)).isDirectory());
+        if (only) return { series, chapter: only, dir: path.join(seriesDir, only) };
     }
-    return best && best.mtime >= since - 60_000 ? best.dir : null;
+    return null;
+}
+
+/**
+ * Moves a fresh download into storage/downloads/<series>/<chapter>, joining thin
+ * strips into taller pages. Earlier tries' pages, rendered output and OCR cache
+ * for that chapter are removed, since their page files no longer match.
+ */
+async function placeChapter(found) {
+    const dest = path.join(DIRS.downloads, found.series, found.chapter);
+    for (const root of [DIRS.downloads, DIRS.translations, DIRS.work]) {
+        rmSync(path.join(root, found.series, found.chapter), { recursive: true, force: true });
+    }
+    const { before, after } = await stitchChapter(found.dir, dest);
+    if (after !== before) log(`  ${c.gray(`↳ Joined ${before} strips into ${after} pages`)}`);
+    return dest;
 }
 
 /**
@@ -387,20 +406,23 @@ async function processJob(job) {
     try {
         // 1. Download.
         await ensureServer();
-        const started = Date.now();
+        const incoming = path.join(INCOMING, String(job.id));
+        rmSync(incoming, { recursive: true, force: true });
         const download = await api('POST', '/api/v1/downloads', {
             sourceId: p.source_id,
             mangaUrl: p.series_url,
             chapterIds: [p.chapter_id],
             format: 'images',
-            downloadPath: DIRS.downloads,
+            downloadPath: incoming,
         });
         const [result] = await follow([download.id], p.title, '  ');
         if (result.status !== 'completed') throw new Error(result.error || `Download ${result.status}`);
-        const dir = findChapterDir(p.chapter_number, started);
-        if (!dir) throw new Error(`Downloaded, but the chapter-${p.chapter_number} folder was not found under ${DIRS.downloads}.`);
-        const series = path.basename(path.dirname(dir));
-        const chapter = path.basename(dir);
+        const found = findIncomingChapter(incoming, p.chapter_number);
+        if (!found) throw new Error(`Downloaded, but no chapter folder was written under ${incoming}.`);
+        const dir = await placeChapter(found);
+        rmSync(incoming, { recursive: true, force: true });
+        const series = found.series;
+        const chapter = found.chapter;
         if (lost) throw new LostJobError('Lease lost while downloading.');
 
         // 2. Translate.

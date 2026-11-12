@@ -1,7 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../config/settings.js';
 import { usage } from './gemini.js';
-import type { LabeledImage } from './llm.js';
 
 let client: Anthropic | null = null;
 
@@ -36,12 +35,8 @@ function strictSchema(schema: unknown): unknown {
  * Thinking depth is controlled with effort (CLAUDE_EFFORT, default "low"); current Claude models
  * don't take a token budget for thinking.
  */
-export async function generateJsonClaude<T>(opts: { model: string; system: string; user: string; schema: object; maxOutputTokens?: number; images?: LabeledImage[] }): Promise<T> {
+export async function generateJsonClaude<T>(opts: { model: string; system: string; user: string; schema: object; maxOutputTokens?: number }): Promise<T> {
     const content: Anthropic.ContentBlockParam[] = [{ type: 'text', text: opts.user }];
-    for (const img of opts.images ?? []) {
-        content.push({ type: 'text', text: img.label });
-        content.push({ type: 'image', source: { type: 'base64', media_type: img.mime, data: img.data.toString('base64') } });
-    }
     const stream = getClient().messages.stream({
         model: opts.model,
         max_tokens: opts.maxOutputTokens ?? 32000,

@@ -1,4 +1,3 @@
-import sharp from 'sharp';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { config } from '../config/settings.js';
@@ -32,8 +31,8 @@ export const listChapters = (series: string) => listDirs(path.join(config.storag
 /**
  * Phase 1 for one chapter:
  *  1. local OCR (GPU) reads every page;
- *  2. one Gemini pass classifies the blocks, fixes OCR errors and translates; with
- *     TRANSLATOR_VISION on (default) it also gets a small crop of each likely text block.
+ *  2. one text-only Gemini pass classifies the blocks, fixes OCR errors and translates
+ *     (no images are ever sent to the model).
  * Translated pages go to translations/<series>/<chapter>/ (images only, ready to upload); the
  * per-page OCR/translation data and the series glossary live in translation-work/<series>/.
  */
@@ -97,9 +96,8 @@ export async function processChapter(series: string, chapter: string, opts: Chap
     } else {
         const glossary = await loadGlossary(seriesWork);
         const widths = new Map(pages.map(p => [p.source, p.width]));
-        logger.info(`[${series}/${chapter}] translating ${pending.length} blocks with ${config.translator.translateModel}${config.translator.vision ? ' + bubble crops' : ''} (glossary: ${glossary.terms.length} terms)`);
-        const crop = config.translator.vision ? cropper(new Map(pages.map((p, i) => [p.source, path.join(srcDir, files[i])]))) : undefined;
-        await translateRegions(pending, widths, glossary, undefined, crop);
+        logger.info(`[${series}/${chapter}] translating ${pending.length} blocks with ${config.translator.translateModel}, text only (glossary: ${glossary.terms.length} terms)`);
+        await translateRegions(pending, widths, glossary);
         await saveGlossary(seriesWork, glossary);
         if (config.translator.polish) {
             const changed = await polishRegions(pending);
@@ -137,39 +135,3 @@ export async function processChapter(series: string, chapter: string, opts: Chap
     logger.info(`[${series}/${chapter}] done → ${outDir}`);
 }
 
-/**
- * Crops a region (plus a margin) out of its original page as a small JPEG for the
- * translation model. Each page is decoded once and kept while its regions are cut.
- */
-function cropper(pageFiles: Map<string, string>) {
-    let current: { id: string; data: Buffer; width: number; height: number; channels: 1 | 2 | 3 | 4 } | null = null;
-    return async (r: Region): Promise<Buffer | null> => {
-        const id = r.id.split('#')[0];
-        const file = pageFiles.get(id);
-        if (!file) {
-            return null;
-        }
-        if (current?.id !== id) {
-            const { data, info } = await sharp(file).removeAlpha().raw().toBuffer({ resolveWithObject: true });
-            current = { id, data, width: info.width, height: info.height, channels: info.channels };
-        }
-        // Generous margins: OCR sometimes misses a bubble's first or last
-        // line, and the model can only read what is in the crop. Vertically
-        // at least ~two lines of text above and below.
-        const lineH = r.ocr.length ? Math.max(...r.ocr.map(o => o.box.h)) : r.box.h;
-        const padX = Math.round(Math.max(24, r.box.w * 0.15));
-        const padY = Math.round(Math.max(48, lineH * 2.2, r.box.h * 0.4));
-        const left = Math.max(0, r.box.x - padX);
-        const top = Math.max(0, r.box.y - padY);
-        const width = Math.min(current.width - left, r.box.w + padX * 2);
-        const height = Math.min(current.height - top, r.box.h + padY * 2);
-        if (width < 8 || height < 8) {
-            return null;
-        }
-        return sharp(current.data, { raw: { width: current.width, height: current.height, channels: current.channels } })
-            .extract({ left, top, width, height })
-            .resize({ width: 512, height: 512, fit: 'inside', withoutEnlargement: true })
-            .jpeg({ quality: 80 })
-            .toBuffer();
-    };
-}

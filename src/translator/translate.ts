@@ -1,7 +1,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import { config } from '../config/settings.js';
-import { generateJson, type LabeledImage } from './llm.js';
+import { generateJson } from './llm.js';
 import type { Glossary, GlossaryTerm, Region, RegionType } from './types.js';
 
 /** Starter terms for game-system text. Edit glossary.json per series to change them. */
@@ -76,23 +76,7 @@ bg = background colour behind the text, bgType = flat/gradient/art, ink = text c
    - system: exactly one mn line per source line; keep brackets, numbers, colons and stat layout.
    - everything else: a single string in mn (it is re-wrapped to fit) — except character cards and lists (e.g. "NAME (27)" / "JOB: ..."), which keep one mn entry per logical line.
 
-IMAGES: blocks marked "crop": true come with a picture of that spot on the page, sent after the JSON and labelled with the block id.
-   - Trust the picture over the OCR text: read the actual lettering (stylised fonts often fool the OCR), and use "source" for what is really written.
-   - The OCR often MISSES whole lines of a bubble, usually the first or the last. The crop shows the area around the block: if the same bubble/box has more lines than the OCR gave you, put the complete text in "source" and translate all of it. Ignore text that belongs to a different bubble.
-   - Use the art for tone: who is speaking, their expression, shouting vs. whispering, a machine or system voice.
-   - If the picture shows no real text there (art, texture, a watermark), the block is skip.
-
 Return one entry for every id.`;
-
-/** Cuts a picture of a region out of its page (JPEG), or null when unavailable. */
-export type CropRegion = (region: Region) => Promise<Buffer | null>;
-
-/** Most crops per request; the largest likely-text blocks get one first. */
-const MAX_CROPS = 60;
-
-/** Blocks big and wordy enough that a picture can help (not 3-px specks). */
-const worthCrop = (r: Region) =>
-    r.box.w >= 24 && r.box.h >= 12 && r.lines.join('').replace(/[^p{L}]/gu, '').length >= 3;
 
 const SCHEMA = {
     type: 'object',
@@ -133,10 +117,9 @@ interface BlockResult {
 const CHUNK_SIZE = 80;
 
 /** Compact description of a block for the model (OCR text + measured layout hints). */
-function describe(r: Region, pageWidth: number, crop = false) {
+function describe(r: Region, pageWidth: number) {
     const cx = (r.box.x + r.box.w / 2) / pageWidth;
     return {
-        ...(crop ? { crop: true } : {}),
         id: r.id,
         ocr: r.lines,
         bg: r.style.backgroundColor ?? 'mixed',
@@ -159,14 +142,13 @@ export async function translateRegions(
     pageWidths: Map<string, number>,
     glossary: Glossary,
     model = config.translator.translateModel,
-    crop?: CropRegion,
 ): Promise<void> {
-    await translatePass(regions, pageWidths, glossary, model, crop);
+    await translatePass(regions, pageWidths, glossary, model);
 
     // Retry once for anything missing or a system window whose line count came back wrong.
     const bad = regions.filter(needsWork);
     if (bad.length) {
-        await translatePass(bad, pageWidths, glossary, model, crop);
+        await translatePass(bad, pageWidths, glossary, model);
         for (const r of bad) {
             if (r.type === 'system' && r.translation && r.translation.length !== r.lines.length) {
                 const t = r.translation;
@@ -176,7 +158,7 @@ export async function translateRegions(
     }
 }
 
-async function translatePass(regions: Region[], pageWidths: Map<string, number>, glossary: Glossary, model: string, crop?: CropRegion): Promise<void> {
+async function translatePass(regions: Region[], pageWidths: Map<string, number>, glossary: Glossary, model: string): Promise<void> {
     const system = SYSTEM + (await styleSection());
     for (let i = 0; i < regions.length; i += CHUNK_SIZE) {
         const chunk = regions.slice(i, i + CHUNK_SIZE);
@@ -185,24 +167,10 @@ async function translatePass(regions: Region[], pageWidths: Map<string, number>,
             .filter(r => r.type !== 'skip')
             .map(r => `${r.lines.join(' ')} → ${(r.translation ?? []).join(' ')}`);
 
-        // Pictures for the blocks most likely to be real text, largest first.
-        const images: LabeledImage[] = [];
-        const withCrop = new Set<string>();
-        if (crop) {
-            const picks = chunk.filter(worthCrop).sort((a, b) => b.box.w * b.box.h - a.box.w * a.box.h).slice(0, MAX_CROPS);
-            for (const r of chunk.filter(r => picks.includes(r))) {
-                const data = await crop(r).catch(() => null);
-                if (data) {
-                    images.push({ label: `Crop for block ${r.id}:`, data, mime: 'image/jpeg' });
-                    withCrop.add(r.id);
-                }
-            }
-        }
-
         const payload = {
             glossary: glossary.terms,
             previous_context: context,
-            blocks: chunk.map(r => describe(r, pageWidths.get(r.id.split('#')[0]) ?? 720, withCrop.has(r.id))),
+            blocks: chunk.map(r => describe(r, pageWidths.get(r.id.split('#')[0]) ?? 720)),
         };
 
         const res = await generateJson<{ blocks: BlockResult[]; new_terms: GlossaryTerm[] }>({
@@ -210,7 +178,6 @@ async function translatePass(regions: Region[], pageWidths: Map<string, number>,
             system,
             schema: SCHEMA,
             user: JSON.stringify(payload),
-            images,
             maxOutputTokens: 32768,
         });
 
