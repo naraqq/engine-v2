@@ -71,7 +71,7 @@ export async function ocrPage(file: string): Promise<{ width: number; height: nu
 
         for (const scale of ocrScales) {
             const png = scale === 1 ? tile.data : await sharp(tile.data).resize({ width: Math.round(tile.width * scale), kernel: 'lanczos3' }).png().toBuffer();
-            const res = await ocr.recognize(png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength) as ArrayBuffer, { flatten: true, minimumConfidence: 0.5 });
+            const res = await ocr.recognize(png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength) as ArrayBuffer, { flatten: true, minimumConfidence: config.translator.ocrMinConfidence });
 
             for (const item of res.results) {
                 const text = item.text.trim();

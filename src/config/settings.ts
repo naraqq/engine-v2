@@ -65,6 +65,8 @@ export const config = {
         /** Local OCR runs on the GPU via DirectML ("dml"); "cpu" works everywhere but ~2.5x slower. */
         ocrProvider: process.env.OCR_PROVIDER || 'dml',
         /** Zoom levels OCR reads each tile at; 2x/3x are needed for small or stylised system-window lettering. */
+        /** Lowest OCR confidence kept. Low readings still mark where text is; the model reads the crop. */
+        ocrMinConfidence: Math.min(Math.max(Number(process.env.OCR_MIN_CONFIDENCE ?? 0.5) || 0, 0), 1),
         ocrScales: (process.env.OCR_SCALES || '2,3').split(',').map(Number).filter(n => n > 0),
         /** Font for the Mongolian text; must contain Ө/Ү. Default: Bubble Sans (comic lettering, full Mongolian Cyrillic). */
         font: process.env.TRANSLATOR_FONT || path.join(__dirname, '../../assets/fonts/bubble-sans-1.01.otf'),
