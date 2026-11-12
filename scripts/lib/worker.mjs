@@ -123,29 +123,20 @@ const readsOf = t => {
     return (Number(t.readers_7d) || 0) + (Number(t.readers_30d) || 0) / 4;
 };
 
-/** Episodes translated back to back before moving to another title. */
-const EPISODE_BATCH = 3;
-
 /**
  * Job priority for a title's new episodes (higher runs first), always above
- * the new-title jobs (5). Episodes go in batches of EPISODE_BATCH: every
- * episode of a batch gets the same priority, so a title's next 3 are done
- * together (and released together) instead of one, then another title.
+ * the new-title jobs (5):
  *   - popular titles first: up to +50 by reads, relative to the most-read title;
- *   - next batch first: up to +44 for the first batch, falling off with its
- *     place in the backlog, so a title with 100+ waiting can't hold the queue
- *     while other titles wait for their next batch.
- * The score is ×1000 plus a per-title tiebreak, so two titles that tie never
- * interleave their batches. Without read counts every title gets the middle
- * popularity score.
+ *   - next episode first: up to +44 for the first missing episode, falling off
+ *     with its place in the backlog, so a title with 100+ waiting can't hold
+ *     the queue while other titles wait for their next one.
+ * Without read counts every title gets the middle popularity score.
  */
 function episodePriority(title, titles, position) {
     const reads = readsOf(title);
     const max = Math.max(0, ...titles.map(readsOf).filter(v => v !== null));
     const popularity = reads === null || max === 0 ? 0.5 : Math.sqrt(reads / max);
-    const batch = Math.floor(position / EPISODE_BATCH);
-    const score = 6 + Math.round(50 * popularity + 44 / (1 + batch * 1.5));
-    return score * 1000 + (Number(title.id) || 0) % 1000;
+    return 6 + Math.round(50 * popularity + 44 / (1 + position / 2));
 }
 
 /** New episodes of Montoon's own titles: the --montoon check, queued. */
