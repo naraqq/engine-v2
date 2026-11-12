@@ -19,8 +19,8 @@
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
-import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
-import { ROOT, api, c, chapterNumber, ensureServer, follow, normalize, say, sleep, status } from './cli.mjs';
+import { existsSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { ROOT, api, c, chapterNumber, childPids, ensureServer, follow, killChildren, killTree, normalize, say, sleep, status, track } from './cli.mjs';
 import { fetchMontoonTitles, findOnSource, montoonConfig, resultUrl, syncMontoon } from './montoon.mjs';
 import { LostJobError, log, mt } from './montoon-api.mjs';
 import { DIRS, removeLocalChapter, translatedPages, uploadChapter } from './upload.mjs';
@@ -434,12 +434,13 @@ async function placeChapter(found) {
  */
 function translateChapter(series, chapter) {
     return new Promise((resolve, reject) => {
-        const child = spawn(process.execPath, ['--no-warnings', '--import', 'tsx', 'src/translator/cli.ts', series, chapter], {
+        const child = track(spawn(process.execPath, ['--no-warnings', '--import', 'tsx', 'src/translator/cli.ts', series, chapter], {
             cwd: ROOT,
             env: process.env,
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
-        });
+        }));
+        writePidFile();
         let lastError = '';
         const onData = chunk => {
             for (const raw of chunk.toString().split(/\r?\n/)) {
@@ -466,7 +467,10 @@ function translateChapter(series, chapter) {
     });
 }
 
+let currentJob = null;
+
 async function processJob(job) {
+    currentJob = job;
     const p = job.payload;
     say('');
     log(`${c.bold(c.cyan('⬇'))} ${c.bold(p.title)} chapter ${c.bold(p.chapter_number)} ${c.gray(`from ${p.source_id} · job #${job.id} · ${p.reason} · try ${job.attempts}/${job.max_attempts}`)}`);
@@ -540,9 +544,77 @@ async function processJob(job) {
             .catch(() => {});
         return false;
     } finally {
+        currentJob = null;
         clearInterval(keepAlive);
         mt('POST', '/heartbeat', { worker: WORKER, info: { current: null } }, { waitOffline: false }).catch(() => {});
     }
+}
+
+// ------------------------------------------------------------- stopping
+
+/** storage/worker.pid: this worker and its child processes, for `download --stop`. */
+const PID_FILE = path.join(path.dirname(DIRS.downloads), 'worker.pid');
+
+function writePidFile() {
+    try {
+        writeFileSync(PID_FILE, JSON.stringify({ pid: process.pid, children: childPids(), worker: WORKER, at: new Date().toISOString() }));
+    } catch { /* not critical */ }
+}
+
+function removePidFile() {
+    try {
+        const saved = JSON.parse(readFileSync(PID_FILE, 'utf8'));
+        if (saved.pid === process.pid) unlinkSync(PID_FILE);
+    } catch { /* already gone */ }
+}
+
+/**
+ * download --stop: ends the worker on this PC and everything it started,
+ * from any terminal. Its current job goes back to the queue when its lease
+ * runs out (or right away if the worker could still report it).
+ */
+export function stopLocalWorker() {
+    let saved;
+    try {
+        saved = JSON.parse(readFileSync(PID_FILE, 'utf8'));
+    } catch {
+        say(c.gray('No worker is running on this PC (no storage/worker.pid).'));
+        return;
+    }
+    for (const pid of [saved.pid, ...(saved.children || [])]) killTree(pid);
+    try { unlinkSync(PID_FILE); } catch { /* fine */ }
+    say(c.green(`Stopped worker "${saved.worker}" (process ${saved.pid}) and its child processes.`));
+}
+
+/**
+ * Ctrl+C (or closing the window): stop now. Kill the translator and engine
+ * process trees, hand the current job back to the queue, and exit. Waiting
+ * for the job to finish isn't an option: with `npm run`, npm exits on the
+ * first Ctrl+C and PowerShell takes the keyboard back, so a second Ctrl+C
+ * would never reach this process.
+ */
+function installStopHandler() {
+    let stopping = false;
+    const stop = async signal => {
+        if (stopping) return;
+        stopping = true;
+        say('');
+        log(c.yellow(`Stopping now (${signal})…`));
+        killChildren();
+        const job = currentJob;
+        if (job) {
+            // Back to the queue right away instead of after the lease expires.
+            await Promise.race([
+                mt('POST', `/jobs/${job.id}/fail`, { worker: WORKER, error: `Stopped on ${WORKER} (${signal}).` }, { waitOffline: false })
+                    .then(() => log(c.gray(`  ↳ Job #${job.id} returned to the queue.`)))
+                    .catch(() => {}),
+                sleep(4000),
+            ]);
+        }
+        removePidFile();
+        process.exit(130);
+    };
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP']) process.on(signal, () => stop(signal));
 }
 
 // ------------------------------------------------------------- commands
@@ -568,20 +640,17 @@ export async function setWorkerEnabled(enabled) {
 export async function runWorker(opts) {
     montoonConfig(); // fails early without a token
     say(c.bold(c.cyan(`▶ Montoon worker "${WORKER}"`)) + c.gray(` · files in ${DIRS.downloads}`));
-    say(c.gray('  Ctrl+C once: finish the current job and stop. Twice: stop now (the job returns to the queue).'));
+    say(c.gray('  Ctrl+C stops it now (the current job goes back to the queue). From another terminal: download --stop'));
 
-    let stopping = false;
-    process.on('SIGINT', () => {
-        if (stopping) process.exit(130);
-        stopping = true;
-        say('');
-        log(c.yellow('Stopping after the current job…'));
-    });
+    installStopHandler();
+    writePidFile();
+    process.once('exit', removePidFile);
 
     const stopEngine = await ensureServer();
+    writePidFile();
     let idle = false, paused = false, done = 0;
     try {
-        while (!stopping) {
+        for (;;) {
             const settings = (await mt('POST', '/heartbeat', { worker: WORKER, info: { platform: process.platform, done } })).data.settings;
             if (!settings.enabled) {
                 if (!paused) log(c.yellow('⏸ Paused from the server. Waiting…'));

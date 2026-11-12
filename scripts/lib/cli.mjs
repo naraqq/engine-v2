@@ -2,7 +2,7 @@
  * Shared plumbing for the terminal commands: talking to the engine API,
  * starting the engine when it isn't running, and terminal output.
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, openSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,6 +49,39 @@ async function isUp() {
     }
 }
 
+// ------------------------------------------------------- child processes
+
+/**
+ * Kills a process and everything it started (the engine's Chrome, the
+ * translator's workers). On Windows child.kill() only ends the one process,
+ * and its children keep running, so use taskkill /T.
+ */
+export function killTree(pid) {
+    if (!pid) return;
+    try {
+        if (process.platform === 'win32') {
+            spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+        } else {
+            process.kill(pid, 'SIGKILL');
+        }
+    } catch { /* already gone */ }
+}
+
+const children = new Set();
+/** Remembers a child process so killChildren() can end it; returns it. */
+export function track(child) {
+    children.add(child);
+    child.once('exit', () => children.delete(child));
+    return child;
+}
+export const childPids = () => [...children].map(ch => ch.pid).filter(Boolean);
+/** Ends every tracked child process tree right now (synchronous, safe on exit). */
+export function killChildren() {
+    for (const child of children) killTree(child.pid);
+    children.clear();
+}
+process.once('exit', killChildren);
+
 /** Starts the API from source when nothing answers; returns a stop function. */
 export async function ensureServer() {
     if (await isUp()) return () => {};
@@ -60,12 +93,12 @@ export async function ensureServer() {
     const out = openSync(logFile, 'a');
 
     status('Starting the engine…');
-    const child = spawn(process.execPath, ['--no-warnings', '--loader', './loader.mjs', '--import', 'tsx', 'src/index.ts'], {
+    const child = track(spawn(process.execPath, ['--no-warnings', '--loader', './loader.mjs', '--import', 'tsx', 'src/index.ts'], {
         cwd: ROOT,
         env: { ...process.env, PORT: port, LOG_LEVEL: process.env.LOG_LEVEL || 'warn' },
         stdio: ['ignore', out, out],
         windowsHide: true,
-    });
+    }));
     let exited = false;
     child.on('exit', () => { exited = true; });
 
@@ -73,15 +106,14 @@ export async function ensureServer() {
     while (!(await isUp())) {
         if (exited) fail(`The engine stopped while starting. See ${logFile}`);
         if (Date.now() > deadline) {
-            child.kill();
+            killTree(child.pid);
             fail(`The engine did not start within 90 s. See ${logFile}`);
         }
         await sleep(1000);
     }
     clearStatus();
-    const stop = () => { if (!exited) child.kill(); };
-    process.once('exit', stop); // also on Ctrl+C / process.exit()
-    return stop;
+    // Also killed by killChildren() on exit, Ctrl+C included.
+    return () => { if (!exited) killTree(child.pid); };
 }
 
 // --------------------------------------------------------------- output

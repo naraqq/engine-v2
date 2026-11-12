@@ -10,7 +10,7 @@ import path from 'node:path';
 import readline from 'node:readline/promises';
 import { ROOT, api, c, ensureServer, fail, follow, normalize, say, status, chapterNumber } from './lib/cli.mjs';
 import { editLinks, syncMontoon } from './lib/montoon.mjs';
-import { runWorker, setWorkerEnabled, workerStatus } from './lib/worker.mjs';
+import { runWorker, setWorkerEnabled, stopLocalWorker, workerStatus } from './lib/worker.mjs';
 import { DIRS, translatedPages, uploadChapter } from './lib/upload.mjs';
 import { montoonConfig } from './lib/montoon.mjs';
 import { readdirSync, existsSync } from 'node:fs';
@@ -40,7 +40,9 @@ const HELP = `Download a series, what's trending, or new episodes for Montoon.
   download --work --once                plan now, work through the queue, then exit
   download --work --no-plan             only take jobs, never plan
   download --work --status              queue, workers and settings
-  download --work --pause | --resume    stop or start every worker
+  download --work --pause | --resume    stop or start every worker (each finishes its job first)
+  download --stop                       shut down the worker on this PC now, with everything it started
+                                        (Ctrl+C in the worker's window does the same)
 
 Options
   --<source>          website ID, e.g. --asurascans (or --source <id>)
@@ -60,7 +62,7 @@ function parseArgs(argv) {
     const takesValue = new Set(['source', 'latest', 'chapters', 'format', 'out', 'only', 'link', 'unlink', 'from', 'limit', 'upload', 'to', 'episode', 'title']);
     const flags = {
         help: 'help', list: 'list', all: 'all', 'dry-run': 'dryRun', montoon: 'montoon',
-        work: 'work', once: 'once', keep: 'keep', 'no-plan': 'noPlan', plan: 'planNow', status: 'status', pause: 'pause', resume: 'resume',
+        work: 'work', once: 'once', keep: 'keep', 'no-plan': 'noPlan', plan: 'planNow', status: 'status', pause: 'pause', resume: 'resume', stop: 'stop',
     };
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
@@ -208,6 +210,7 @@ async function main() {
     if (opts.source === 'montoon') opts.montoon = true;
     if (opts.montoon && opts.source === 'montoon') delete opts.source;
     if (opts.upload !== undefined) return uploadCommand(opts);
+    if (opts.stop) return stopLocalWorker();
     if (opts.work) {
         if (opts.status) return workerStatus();
         if (opts.pause || opts.resume) return setWorkerEnabled(Boolean(opts.resume));
