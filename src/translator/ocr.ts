@@ -56,7 +56,7 @@ function iou(a: Box, b: Box): number {
 
 /**
  * Reads every text line on a page. Tall strips are processed as overlapping tiles, each read at
- * several zoom levels (OCR_SCALES, default 2,3): small or stylised lettering (system windows) is only
+ * several zoom levels (OCR_SCALES, default 1,2): big lettering is found at 1x, small or stylised lettering is only
  * readable when enlarged, and the scales catch different lines. The best reading of each line wins.
  */
 export async function ocrPage(file: string): Promise<{ width: number; height: number; lines: OcrLine[] }> {

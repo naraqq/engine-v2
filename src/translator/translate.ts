@@ -78,6 +78,7 @@ bg = background colour behind the text, bgType = flat/gradient/art, ink = text c
 
 IMAGES: blocks marked "crop": true come with a picture of that spot on the page, sent after the JSON and labelled with the block id.
    - Trust the picture over the OCR text: read the actual lettering (stylised fonts often fool the OCR), and use "source" for what is really written.
+   - The OCR often MISSES whole lines of a bubble, usually the first or the last. The crop shows the area around the block: if the same bubble/box has more lines than the OCR gave you, put the complete text in "source" and translate all of it. Ignore text that belongs to a different bubble.
    - Use the art for tone: who is speaking, their expression, shouting vs. whispering, a machine or system voice.
    - If the picture shows no real text there (art, texture, a watermark), the block is skip.
 

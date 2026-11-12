@@ -153,11 +153,16 @@ function cropper(pageFiles: Map<string, string>) {
             const { data, info } = await sharp(file).removeAlpha().raw().toBuffer({ resolveWithObject: true });
             current = { id, data, width: info.width, height: info.height, channels: info.channels };
         }
-        const pad = Math.round(Math.max(16, Math.min(r.box.w, r.box.h) * 0.3));
-        const left = Math.max(0, r.box.x - pad);
-        const top = Math.max(0, r.box.y - pad);
-        const width = Math.min(current.width - left, r.box.w + pad * 2);
-        const height = Math.min(current.height - top, r.box.h + pad * 2);
+        // Generous margins: OCR sometimes misses a bubble's first or last
+        // line, and the model can only read what is in the crop. Vertically
+        // at least ~two lines of text above and below.
+        const lineH = r.ocr.length ? Math.max(...r.ocr.map(o => o.box.h)) : r.box.h;
+        const padX = Math.round(Math.max(24, r.box.w * 0.15));
+        const padY = Math.round(Math.max(48, lineH * 2.2, r.box.h * 0.4));
+        const left = Math.max(0, r.box.x - padX);
+        const top = Math.max(0, r.box.y - padY);
+        const width = Math.min(current.width - left, r.box.w + padX * 2);
+        const height = Math.min(current.height - top, r.box.h + padY * 2);
         if (width < 8 || height < 8) {
             return null;
         }
