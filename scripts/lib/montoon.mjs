@@ -10,7 +10,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { ROOT, api, c, chapterNumber, describeNumbers, ensureServer, fail, follow, normalize, say, status } from './cli.mjs';
+import { ROOT, api, c, chapterNumber, describeNumbers, ensureServer, fail, follow, normalize, say, sleep, status } from './cli.mjs';
 
 const LINKS_FILE = path.join(ROOT, 'storage', 'montoon-links.json');
 
@@ -158,7 +158,7 @@ export async function syncMontoon(opts, outDir) {
             || normalize(t.title_mn).includes(needle));
         say(`  ${c.bold(titles.length)} match "${opts.only}".`);
     }
-    if (!titles.length) return;
+    if (!titles.length) return { updated: 0, pending: 0, notFound: 0, failed: 0, notFoundTitles: [], failedTitles: [] };
 
     const stopServer = await ensureServer();
     const totals = { withNew: 0, skipped: 0, upToDate: 0, updated: 0, chapters: 0, notFound: 0, empty: 0, failed: 0, pending: 0 };
@@ -202,16 +202,30 @@ export async function syncMontoon(opts, outDir) {
                     continue;
                 }
 
-                /** Chapter list of a series page; never throws. */
+                /**
+                 * Chapter list of a series page; never throws. Errors that look
+                 * temporary (Cloudflare, timeouts) are retried, and if they
+                 * persist the result is marked `transient`, so the title counts
+                 * as failed this round instead of "not found", and its link is kept.
+                 */
                 const tryRead = async ({ url, site }) => {
-                    status(c.gray(`  ↳ Reading the chapter list on ${site.title}…`));
-                    try {
-                        return { chapters: await api('GET', `/api/v1/sources/${site.id}/manga/${encodeURIComponent(url)}/chapters`), problem: null };
-                    } catch (error) {
-                        // Madara sites fail this way when the series page redirects away.
-                        const removed = /is not valid JSON/.test(error.message);
-                        return { chapters: [], problem: removed ? 'its page no longer opens (removed or redirected)' : error.message };
+                    let last = null;
+                    for (let attempt = 1; attempt <= 3; attempt++) {
+                        status(c.gray(`  ↳ Reading the chapter list on ${site.title}…${attempt > 1 ? ` (try ${attempt}/3)` : ''}`));
+                        try {
+                            const chapters = await api('GET', `/api/v1/sources/${site.id}/manga/${encodeURIComponent(url)}/chapters`);
+                            if (chapters.length || attempt === 3) return { chapters, problem: null, transient: false };
+                            last = { chapters: [], problem: null, transient: false };
+                        } catch (error) {
+                            // Madara sites fail this way when the series page redirects away.
+                            if (/is not valid JSON/.test(error.message)) {
+                                return { chapters: [], problem: 'its page no longer opens (removed or redirected)', transient: false };
+                            }
+                            last = { chapters: [], problem: error.message, transient: true };
+                        }
+                        await sleep(5000 * attempt);
                     }
+                    return last;
                 };
 
                 /**
@@ -220,13 +234,16 @@ export async function syncMontoon(opts, outDir) {
                  */
                 const searchAndLink = async () => {
                     const closest = [];
+                    const problems = [];
                     for (const site of searchSites) {
                         status(c.gray(`  ↳ Searching ${site.title} for "${name}"…`));
-                        const { matches, candidates } = await findOnSource(site, name).catch(() => ({ matches: [], candidates: [] }));
+                        const { matches, candidates } = await findOnSource(site, name)
+                            .catch(error => (problems.push(`${site.title} search: ${error.message}`), { matches: [], candidates: [] }));
                         if (!matches.length) closest.push(...candidates);
                         for (const match of matches) {
                             const found = resultUrl(match.id, site);
                             const read = await tryRead({ url: found, site });
+                            if (read.transient) problems.push(`${site.title}: ${read.problem}`);
                             if (!read.chapters.length) {
                                 say(c.yellow(`  ↳ "${match.title}" is listed on ${site.title}, but ${read.problem || 'its page has no chapters'}.`));
                                 continue;
@@ -237,6 +254,13 @@ export async function syncMontoon(opts, outDir) {
                             return { url: found, site, chapters: read.chapters };
                         }
                     }
+                    if (problems.length) {
+                        // The site didn't answer properly: not the same as "not there".
+                        say(c.red(`  ✖ Couldn't check this round (${problems[0]}). Tried again next plan.`));
+                        broken.push(t);
+                        totals.failed++;
+                        return null;
+                    }
                     say(c.red(`  ✖ Not available on ${searchNames}.`) + (closest.length ? c.gray(` Closest titles: ${closest.slice(0, 3).join(' · ')}`) : ''));
                     unmatched.push(t);
                     totals.notFound++;
@@ -244,8 +268,10 @@ export async function syncMontoon(opts, outDir) {
                 };
 
                 // 1. Which website, and where on it? A link saved here wins,
-                // then the source link in Montoon's metadata, then a search.
-                const given = links[t.id]?.url || t.source_url || null;
+                // otherwise a title search. Montoon's own source_url is not
+                // used: it records where the title's details came from, which
+                // is often not where its episodes are (or a different edition).
+                const given = links[t.id]?.url || null;
                 const manual = links[t.id]?.how === 'manual';
                 let target = null;
                 let chapters = [];
@@ -257,6 +283,12 @@ export async function syncMontoon(opts, outDir) {
                         say(`  ${c.magenta(site.title)} ${c.gray(`↳ ${target.url}`)}`);
                         const read = await tryRead(target);
                         chapters = read.chapters;
+                        if (!chapters.length && read.transient) {
+                            say(c.red(`  ✖ Couldn't read the chapter list (${read.problem}). Link kept; tried again next plan.`));
+                            broken.push(t);
+                            totals.failed++;
+                            continue;
+                        }
                         if (!chapters.length) {
                             if (manual) {
                                 // Your own link: report it, don't second-guess it.
@@ -273,8 +305,7 @@ export async function syncMontoon(opts, outDir) {
                             target = null;
                         }
                     } else {
-                        // Wikis, MangaDex, Reddit…: where the details came from, not the episodes.
-                        say(c.gray(`  ↳ Montoon's link is ${host || given} (title info, not episodes). Searching instead.`));
+                        say(c.gray(`  ↳ The saved link is on ${host || given}, which isn't an episode site. Searching instead.`));
                     }
                 }
                 if (!target) {
@@ -307,7 +338,7 @@ export async function syncMontoon(opts, outDir) {
                 }
                 // Worker mode: queue them for whichever worker is free.
                 if (opts.enqueue) {
-                    const queued = await opts.enqueue({ title: t, site: target.site, url: target.url, chapters: fresh });
+                    const queued = await opts.enqueue({ title: t, titles, site: target.site, url: target.url, chapters: fresh });
                     say(c.cyan(`  ⇢ Queued ${count(queued.created, 'job')}`) + (queued.existing ? c.gray(` (${queued.existing} already queued earlier)`) : ''));
                     totals.pending += fresh.length;
                     totals.updated++;
@@ -370,5 +401,6 @@ export async function syncMontoon(opts, outDir) {
         if (fixable.length > 10) say(c.gray(`    …and ${fixable.length - 10} more.`));
     }
     if (totals.failed && !opts.enqueue) process.exitCode = 1;
-    return totals;
+    const label = t => `${t.title || t.title_mn} (#${t.id})`;
+    return { ...totals, notFoundTitles: unmatched.map(label), failedTitles: broken.map(label) };
 }

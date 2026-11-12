@@ -92,21 +92,55 @@ const chapterJob = ({ site, url, chapter, title, contentId = null, workerTitleId
     },
 });
 
+/**
+ * A title's readership, once Montoon's sync API sends it (reads in the last
+ * 7 days preferred). null while it doesn't.
+ */
+const readsOf = t => {
+    const value = t.reads_7d ?? t.reads_30d ?? t.reads ?? t.views_7d ?? t.views;
+    return Number.isFinite(Number(value)) ? Number(value) : null;
+};
+
+/**
+ * Job priority for a title's new episodes (higher runs first), always above
+ * the new-title jobs (5):
+ *   - popular titles first: up to +50 by reads, relative to the most-read title;
+ *   - next episode first: up to +44 for the first missing episode, falling off
+ *     with its place in the backlog, so a title with 100+ waiting can't hold
+ *     the queue while other titles wait for their next one.
+ * Without read counts every title gets the middle popularity score.
+ */
+function episodePriority(title, titles, position) {
+    const reads = readsOf(title);
+    const max = Math.max(0, ...titles.map(readsOf).filter(v => v !== null));
+    const popularity = reads === null || max === 0 ? 0.5 : Math.sqrt(reads / max);
+    return 6 + Math.round(50 * popularity + 44 / (1 + position / 2));
+}
+
 /** New episodes of Montoon's own titles: the --montoon check, queued. */
 async function planEpisodes() {
     log(c.cyan('▶ Checking Montoon titles for new episodes'));
     const totals = await syncMontoon({
         from: EPISODE_SITES,
         format: 'images',
-        enqueue: ({ title, site, url, chapters }) => queueJobs(chapters.map(chapter => chapterJob({
+        enqueue: ({ title, titles, site, url, chapters }) => queueJobs(chapters.map((chapter, position) => chapterJob({
             site, url, chapter,
             title: title.title || title.title_mn,
             contentId: title.id,
-            priority: 10, // keep running series going before starting new ones
+            priority: episodePriority(title, titles, position),
             reason: 'new episode',
         }))),
     }, DIRS.downloads);
-    return { titles: totals.updated, episodes: totals.pending, not_found: totals.notFound };
+    if (totals.notFoundTitles.length) log(c.yellow(`  Not on ${EPISODE_SITES}: ${totals.notFoundTitles.join(', ')}`));
+    if (totals.failedTitles.length) log(c.yellow(`  Couldn't check (retried next plan): ${totals.failedTitles.join(', ')}`));
+    return {
+        titles: totals.updated,
+        episodes: totals.pending,
+        not_found: totals.notFound,
+        failed: totals.failed,
+        not_found_titles: totals.notFoundTitles,
+        failed_titles: totals.failedTitles,
+    };
 }
 
 /** Pick new titles to start, within today's limit, and queue their first chapters. */
