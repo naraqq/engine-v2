@@ -198,6 +198,22 @@ export async function syncMontoon(opts, outDir) {
         }
         const searchNames = searchSites.map(s => s.title).join(' or ');
         const sitesByHost = episodeSitesByHost(searchSites);
+        // A link you saved may point at any website the engine supports, not
+        // only the ones searched by title. Loaded once, on first need.
+        let everySite = null;
+        const anySiteByHost = async host => {
+            if (sitesByHost.has(host)) return sitesByHost.get(host);
+            if (!everySite) {
+                const all = [];
+                for (let page = 1; page < 100; page++) {
+                    const rows = await api('GET', `/api/v1/sources?limit=100&page=${page}`).catch(() => []);
+                    all.push(...(Array.isArray(rows) ? rows : []));
+                    if (!Array.isArray(rows) || rows.length < 100) break;
+                }
+                everySite = episodeSitesByHost(all.filter(s => s?.url));
+            }
+            return everySite.get(host) || null;
+        };
         const notes = [
             opts.dryRun ? 'dry run: nothing is downloaded' : null,
             opts.limit ? `cap: ${count(opts.limit, 'title')} with new episodes` : null,
@@ -300,7 +316,7 @@ export async function syncMontoon(opts, outDir) {
                 let chapters = [];
                 if (given) {
                     const host = bareHost(given);
-                    const site = host && sitesByHost.get(host);
+                    const site = host && await anySiteByHost(host);
                     if (site) {
                         target = { url: seriesUrl(given, site), site };
                         say(`  ${c.magenta(site.title)} ${c.gray(`↳ ${target.url}`)}`);

@@ -56,13 +56,13 @@ Options
   --out <dir>         output folder (default: engine-v2/storage/downloads)
   --list              show the chapters and stop
   --<n>, --limit <n>  cap: Montoon titles to update, or trending series
-  --from <a,b>        with --montoon: episode sites, searched in order (default asurascans,manga18fx,weebcentral,mangaread)
+  --from <a,b>        with --montoon: episode sites, searched in order (default asurascans,manga18fx,weebcentral,mangaread,kingofshojo)
   -h, --help          this help`;
 
 // ------------------------------------------------------------- arguments
 
 function parseArgs(argv) {
-    const opts = { format: 'images', from: 'asurascans,manga18fx,weebcentral,mangaread', words: [] };
+    const opts = { format: 'images', from: 'asurascans,manga18fx,weebcentral,mangaread,kingofshojo', words: [] };
     const takesValue = new Set(['source', 'latest', 'chapters', 'format', 'out', 'only', 'link', 'unlink', 'from', 'limit', 'upload', 'preview-title', 'to', 'episode', 'title']);
     const flags = {
         help: 'help', list: 'list', all: 'all', 'dry-run': 'dryRun', montoon: 'montoon',
