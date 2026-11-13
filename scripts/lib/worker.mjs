@@ -28,8 +28,8 @@ import { stitchChapter } from './stitch.mjs';
 
 const WORKER = (process.env.WORKER_NAME || os.hostname()).replace(/[^\w.-]+/g, '-').slice(0, 56);
 const JOB_TTL = 900; // seconds a claimed job stays ours without a heartbeat
-/** Searched in this order; mangaread only for titles the first two don't have (its pages carry a watermark). */
-const EPISODE_SITES = 'asurascans,manga18fx,mangaread';
+/** Searched in this order; weebcentral and then mangaread only for titles the first two don't have (mangaread pages carry a watermark). */
+const EPISODE_SITES = 'asurascans,manga18fx,weebcentral,mangaread';
 
 const count = (n, one, many = one + 's') => `${n} ${n === 1 ? one : many}`;
 

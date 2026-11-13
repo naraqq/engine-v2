@@ -1,6 +1,6 @@
 import { Tags } from '../Tags';
 import icon from './WeebCentral.webp';
-import { Chapter, DecoratableMangaScraper, type Manga } from '../providers/MangaPlugin';
+import { Chapter, DecoratableMangaScraper, Manga, type MangaPlugin } from '../providers/MangaPlugin';
 import * as Common from './decorators/Common';
 import { FetchCSS } from '../platform/FetchProvider';
 
@@ -25,6 +25,21 @@ export default class extends DecoratableMangaScraper {
 
     public override get Icon() {
         return icon;
+    }
+
+    /** The site's own search (server-rendered results), instead of crawling the whole catalog. */
+    public async SearchMangas(provider: MangaPlugin, query: string): Promise<Manga[]> {
+        const url = new URL('/search/data', this.URI);
+        url.search = new URLSearchParams({
+            text: query, sort: 'Best Match', order: 'Descending', official: 'Any', anime: 'Any', adult: 'Any',
+            display_mode: 'Minimal Display', limit: '32', offset: '0',
+        }).toString();
+        const anchors = await FetchCSS<HTMLAnchorElement>(new Request(url), 'a.link[data-tip][href*="/series/"]');
+        const seen = new Set<string>();
+        return anchors
+            .map(anchor => ({ id: new URL(anchor.href, this.URI).pathname, title: anchor.dataset.tip?.trim() ?? anchor.textContent.trim() }))
+            .filter(({ id, title }) => /^\/series\/[^/]+\/[^/]+$/.test(id) && title && !seen.has(id) && seen.add(id))
+            .map(({ id, title }) => new Manga(this, provider, id, title));
     }
 
     public override async FetchChapters(manga: Manga): Promise<Chapter[]> {
