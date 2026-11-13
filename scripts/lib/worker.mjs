@@ -186,13 +186,46 @@ async function planEpisodes() {
 }
 
 /** Pick new titles to start, within today's limit, and queue their first chapters. */
+/**
+ * Picked titles that aren't on Montoon yet always keep their first-chapter
+ * jobs: if those were removed (e.g. "Clear queue"), queue them again.
+ * Queuing is idempotent by key, so existing jobs are left alone.
+ */
+async function requeueOrphanedPicks(registry, settings) {
+    const waiting = registry.data.filter(t => t.decision === 'picked' && !t.content_id).slice(0, 30);
+    let created = 0;
+    for (const t of waiting) {
+        try {
+            const site = await api('GET', `/api/v1/sources/${t.source_id}`);
+            const url = t.series_url.replace(/\/+$/, '');
+            const first = (await api('GET', `/api/v1/sources/${site.id}/manga/${encodeURIComponent(url)}/chapters`))
+                .map(ch => ({ ...ch, number: chapterNumber(ch) }))
+                .filter(ch => Number.isFinite(ch.number))
+                .sort((a, b) => a.number - b.number)
+                .slice(0, settings.first_chapters);
+            const result = await queueJobs(first.map(chapter => chapterJob({
+                site, url, chapter, title: t.title, workerTitleId: t.id, priority: 60, reason: 'new title',
+            })));
+            if (result.created) {
+                created += result.created;
+                log(c.cyan(`  ⇢ Queued the first chapters of "${t.title}" again (${result.created} jobs were missing).`));
+            }
+        } catch (error) {
+            log(c.yellow(`  ⚠ Couldn't requeue "${t.title}": ${error.message}`));
+        }
+    }
+    if (created) logEvent('note', `Requeued ${count(created, 'missing first-chapter job')} for picked titles not on Montoon yet`, { level: 'warning' });
+    return created;
+}
+
 async function planNewTitles(settings) {
     const registry = await mt('GET', '/titles?limit=2000');
+    const requeued = await requeueOrphanedPicks(registry, settings);
     const quota = settings.new_titles_per_day - registry.picked_today;
     log(c.cyan(`▶ Looking for new titles (${registry.picked_today}/${settings.new_titles_per_day} picked today)`));
     if (quota <= 0) {
         log(c.gray('  Today\'s limit is reached. Skipping.'));
-        return { picked: 0 };
+        return { picked: 0, requeued };
     }
 
     // Everything Montoon has, old translations included, and every title
