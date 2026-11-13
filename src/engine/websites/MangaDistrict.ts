@@ -8,7 +8,8 @@ function PageExtractor(image: HTMLImageElement): string {
     return image.dataset.wpfcOriginalSrc || image.src;
 }
 
-@Madara.MangaCSS(/^{origin}\/title\/[^/]+\/$/, 'ol.breadcrumb li:last-of-type a')
+// The site moved series pages from /title/<slug>/ to /series/<slug>/.
+@Madara.MangaCSS(/^{origin}\/(title|series)\/[^/]+\/$/, 'ol.breadcrumb li:last-of-type a')
 @Madara.MangasMultiPageAJAX()
 @Madara.ChaptersSinglePageAJAXv2()
 @Common.PagesSinglePageCSS('div.page-break img', PageExtractor)

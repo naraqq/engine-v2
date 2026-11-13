@@ -152,9 +152,14 @@ export class MangaPlugin extends MediaContainer<Manga> {
         // Initialize first (runs once): some sites look up their current
         // domain there, and the URL check below compares against it.
         await this.Initialize();
-        if(this.scraper.ValidateMangaURL(url)) {
-            const manga = await this.scraper.FetchManga(this, url);
-            return this.Entries.Value.find((entry) => entry.IsSameAs(manga)) ?? manga;
+        // Sites differ on the trailing slash of a series URL (Madara sites
+        // often require it, others reject it), so accept either form.
+        const toggled = url.replace(/[?#].*$/, '').endsWith('/') ? url.replace(/\/+(?=([?#]|$))/, '') : url.replace(/(?=([?#]|$))/, '/');
+        for (const candidate of [url, toggled]) {
+            if(this.scraper.ValidateMangaURL(candidate)) {
+                const manga = await this.scraper.FetchManga(this, candidate);
+                return this.Entries.Value.find((entry) => entry.IsSameAs(manga)) ?? manga;
+            }
         }
     }
 
