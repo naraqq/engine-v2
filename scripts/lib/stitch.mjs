@@ -5,6 +5,7 @@
  * takes at most 300 files per episode, and a speech bubble cut between two
  * strips is OCR'd as two broken halves. Stacking consecutive strips into pages
  * of up to TARGET px fixes both. Pages already taller than that are kept as-is.
+ * Normal portrait manga pages (WeebCentral, MangaDex-style) are left alone.
  */
 import path from 'node:path';
 import { copyFileSync, mkdirSync, readdirSync } from 'node:fs';
@@ -22,7 +23,7 @@ const HARD_MAX = 12000;
 const MAX_PAGES = 280;
 
 /** Stitches every image in `srcDir` (reading order) into `destDir`. Returns { before, after }. */
-export async function stitchChapter(srcDir, destDir) {
+export async function stitchChapter(srcDir, destDir, opts = {}) {
     const files = readdirSync(srcDir).filter(f => IMAGE.test(f))
         .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
     mkdirSync(destDir, { recursive: true });
@@ -40,6 +41,19 @@ export async function stitchChapter(srcDir, destDir) {
     for (const p of pages) counts.set(p.width, (counts.get(p.width) ?? 0) + 1);
     const width = [...counts].sort((a, b) => b[1] - a[1])[0][0];
     const scaled = p => Math.round(p.height * width / p.width);
+
+    // Printed-manga sources (opts.pages): each image is already a whole page
+    // (portrait, ~1.4× taller than wide); stacking them only shrinks spreads.
+    // Webtoon slices look similar in shape, so the caller decides by source.
+    const ratios = pages.map(p => p.height / p.width).sort((a, b) => a - b);
+    const median = ratios[Math.floor(ratios.length / 2)];
+    if (opts.pages && pages.length <= MAX_PAGES && median >= 1.15 && median <= 3) {
+        const digits = Math.max(2, String(pages.length).length);
+        for (const [i, p] of pages.entries()) {
+            copyFileSync(p.file, path.join(destDir, `${String(i + 1).padStart(digits, '0')}${path.extname(p.name).toLowerCase()}`));
+        }
+        return { before: pages.length, after: pages.length };
+    }
 
     // Taller target if the chapter would still have too many pages.
     const total = pages.reduce((sum, p) => sum + scaled(p), 0);
