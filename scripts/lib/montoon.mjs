@@ -11,6 +11,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { ROOT, api, c, chapterNumber, describeNumbers, ensureServer, fail, follow, normalize, say, sleep, status } from './cli.mjs';
+import { findByOtherNames, isLatin as isLatinName, recentlyMissed, rememberMiss } from './aliases.mjs';
+import { workerName } from './montoon-api.mjs';
 
 /** This PC's links (found automatically or set with --link). */
 const LINKS_FILE = path.join(ROOT, 'storage', 'montoon-links.json');
@@ -91,6 +93,26 @@ export async function findOnSource(source, title) {
         if (matches.length) return { matches, candidates: [] };
     }
     return { matches: [], candidates: (first ?? []).slice(0, 3).map(r => r.title) };
+}
+
+/**
+ * Tells Montoon where [t]'s episodes are (and its other names), so every
+ * worker PC uses the same source. Best effort: an older backend just
+ * doesn't have the endpoint yet.
+ */
+async function saveSource(t, { url, site, title, how, names = [], mangaupdatesId = null }) {
+    try {
+        const { base, token } = montoonConfig();
+        await fetch(`${base}/v2/sync/titles/${t.id}/source`, {
+            method: 'POST',
+            headers: { 'X-Sync-Token': token, 'content-type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify({
+                worker: workerName(), url, site: site?.id || null, title, how,
+                names: names.slice(0, 40), mangaupdates_id: mangaupdatesId,
+            }),
+            signal: AbortSignal.timeout(20_000),
+        });
+    } catch { /* the local link still works on this PC */ }
 }
 
 /** --link <montoon id> <url> and --unlink <montoon id>. */
@@ -274,11 +296,15 @@ export async function syncMontoon(opts, outDir) {
                 const searchAndLink = async () => {
                     const closest = [];
                     const problems = [];
-                    for (const site of searchSites) {
-                        status(c.gray(`  ↳ Searching ${site.title} for "${name}"…`));
-                        const { matches, candidates } = await findOnSource(site, name)
+                    // Montoon's own other names (original/alternative titles) count as the title.
+                    const ownNames = [name, ...(t.names || [])]
+                        .filter((n, i, all) => isLatinName(n) && all.findIndex(m => normalize(m) === normalize(n)) === i)
+                        .slice(0, 4);
+                    for (const site of searchSites) for (const query of ownNames) {
+                        status(c.gray(`  ↳ Searching ${site.title} for "${query}"…`));
+                        const { matches, candidates } = await findOnSource(site, query)
                             .catch(error => (problems.push(`${site.title} search: ${error.message}`), { matches: [], candidates: [] }));
-                        if (!matches.length) closest.push(...candidates);
+                        if (!matches.length && query === name) closest.push(...candidates);
                         for (const match of matches) {
                             const found = resultUrl(match.id, site);
                             const read = await tryRead({ url: found, site });
@@ -290,9 +316,39 @@ export async function syncMontoon(opts, outDir) {
                             links[t.id] = { url: found, title: match.title, how: 'auto', linkedAt: new Date().toISOString() };
                             saveLinks(links);
                             say(`  ${c.green(`✓ Found "${match.title}" on ${site.title}`)} ${c.gray(`→ ${found}`)}`);
+                            if (query !== name) await saveSource(t, { url: found, site, title: match.title, how: 'alias' });
                             return { url: found, site, chapters: read.chapters };
                         }
                     }
+
+                    // Other names from MangaUpdates (Plaything = "A Sense of Amusement").
+                    // A title that wasn't found keeps that answer for a few days,
+                    // so every plan doesn't search all sites under every name.
+                    if (!problems.length && !recentlyMissed(t.id)) {
+                        const other = await findByOtherNames({
+                            names: [name, ...(t.names || [])],
+                            cover: t.cover || null,
+                            minNewest: have ?? 0,
+                            tried: ownNames,
+                            sites: searchSites,
+                            read: async (site, url) => (await tryRead({ url, site })).chapters.map(ch => ({ ...ch, number: chapterNumber(ch) })),
+                            search: async (site, query) => (await findOnSource(site, query)).matches,
+                            toUrl: (match, site) => resultUrl(match.id, site),
+                            say,
+                        }).catch(error => (say(c.gray(`  ↳ Other-name search failed: ${error.message}`)), null));
+                        if (other?.url) {
+                            links[t.id] = { url: other.url, title: other.title, how: 'alias', linkedAt: new Date().toISOString() };
+                            saveLinks(links);
+                            say(`  ${c.green(`✓ Found as "${other.title}" on ${other.site.title}`)} ${c.gray(`(${other.proof}) → ${other.url}`)}`);
+                            await saveSource(t, { url: other.url, site: other.site, title: other.title, how: 'alias', names: other.names, mangaupdatesId: other.mangaupdatesId });
+                            return { url: other.url, site: other.site, chapters: other.chapters };
+                        }
+                        if (other?.candidates?.length) {
+                            say(c.yellow(`  ↳ Listed under other names, but not provably the same series: ${other.candidates.slice(0, 4).join(' · ')}. Link the right one with --link ${t.id} <url>.`));
+                        }
+                        rememberMiss(t.id);
+                    }
+
                     if (problems.length) {
                         // The site didn't answer properly: not the same as "not there".
                         say(c.red(`  ✖ Couldn't check this round (${problems[0]}). Tried again next plan.`));
@@ -310,8 +366,9 @@ export async function syncMontoon(opts, outDir) {
                 // otherwise a title search. Montoon's own source_url is not
                 // used: it records where the title's details came from, which
                 // is often not where its episodes are (or a different edition).
-                const given = links[t.id]?.url || null;
-                const manual = links[t.id]?.how === 'manual';
+                // A source another worker PC found (saved on Montoon) counts too.
+                const given = links[t.id]?.url || t.episode_source?.url || null;
+                const manual = (links[t.id] || t.episode_source)?.how === 'manual';
                 let target = null;
                 let chapters = [];
                 if (given) {

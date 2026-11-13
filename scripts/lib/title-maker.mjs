@@ -13,14 +13,14 @@ import { log, mt, workerName } from './montoon-api.mjs';
 const TYPES = ['manga', 'manhwa', 'manhua'];
 const STATUSES = ['ongoing', 'completed', 'hiatus'];
 
-const geminiKey = () => {
+export const geminiKey = () => {
     const key = process.env.GEMINI_API_KEY || '';
     return key && !/your-gemini-api-key/i.test(key) ? key : null;
 };
 
 // ---------------------------------------------------------------- cover
 
-async function fetchImage(url, referer) {
+export async function fetchImage(url, referer) {
     try {
         const response = await fetch(url, {
             headers: { Referer: referer, 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0 Safari/537.36' },
@@ -37,7 +37,7 @@ async function fetchImage(url, referer) {
 }
 
 /** The page's cover, full size when the site serves a resized one ("…-400.webp"). */
-async function coverFrom(info, pageUrl) {
+export async function coverFrom(info, pageUrl) {
     if (!info?.cover) return null;
     const fullSize = info.cover.replace(/-\d{3,4}(?=\.(webp|jpe?g|png)(\?|$))/i, '');
     const referer = new URL(pageUrl).origin + '/';
@@ -145,7 +145,7 @@ const SAFETY = ['HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_HATE_SPEECH', 'HARM_C
  * One JSON answer from Gemini (thinking capped at 256), retried when it
  * comes back empty or unparsable; the error names the finish reason.
  */
-async function askJson(ai, model, contents, schema, attempts = 3) {
+export async function askJson(ai, model, contents, schema, attempts = 3) {
     let reason = 'no answer';
     for (let attempt = 1; attempt <= attempts; attempt++) {
         try {

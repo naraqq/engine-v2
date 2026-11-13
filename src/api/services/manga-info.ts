@@ -66,18 +66,27 @@ const INFO_SCRIPT = `
         const consider = (u, w, h, el) => {
             if (!u || /logo|avatar|icon|favicon|ads?\\//i.test(u) || (el && inNav(el))) return;
             const own = matchesSeries(u);
+            // The series' own poster slot (WordPress manga themes): beats a bigger
+            // cover of another series in a "popular" list beside it. Often lazy-loaded,
+            // so its size comes from the HTML attributes, and it skips the size check.
+            const slot = el && el.closest && el.closest('[itemprop="image"], .thumb, .summary_image, .series-thumb, .infomanga .thumb') ? 30 : 1;
+            if (el && !w) { w = Number(el.getAttribute('width')) || 0; h = Number(el.getAttribute('height')) || 0; }
             const ratio = w && h ? h / w : 0;
-            if (!own && (w < 150 || h < 200 || ratio < 1.15 || ratio > 1.9)) return;
+            if (!own && slot === 1 && (w < 150 || h < 200 || ratio < 1.15 || ratio > 1.9)) return;
             const alt = ((el && el.alt) || '').toLowerCase();
-            const score = (own ? 50 : 1) * (words.some(word => alt.includes(word)) ? 4 : 1)
-                * (ratio >= 1.15 && ratio <= 1.9 ? 3 : 1) * Math.max(w * h, 1);
+            const score = slot * (own ? 50 : 1) * (words.some(word => alt.includes(word)) ? 4 : 1)
+                * (ratio >= 1.15 && ratio <= 1.9 ? 3 : 1) * Math.max(w * h, slot > 1 ? 120_000 : 1);
             if (!best || score > best.score) best = { u, score };
         };
         for (const img of document.images) consider(imgUrl(img), img.naturalWidth, img.naturalHeight, img);
         for (const source of document.querySelectorAll('picture source[srcset]')) {
             consider(source.getAttribute('srcset').split(',')[0].trim().split(' ')[0], 0, 0, source.parentElement?.querySelector('img'));
         }
-        let cover = best ? best.u : '';
+        // A poster marked up as the page's own image (schema.org itemprop) wins
+        // outright: lazy loading and ad slots make the size-based pick unstable.
+        const marked = [...document.querySelectorAll('img[itemprop="image"], [itemprop="image"] img')]
+            .find(img => !inNav(img) && imgUrl(img) && !/logo|avatar|icon/i.test(imgUrl(img)));
+        let cover = marked ? imgUrl(marked) : best ? best.u : '';
         cover = cover || meta('og:image') || (typeof ld.image === 'string' ? ld.image : (ld.image && ld.image.url) || '');
 
         // Genres / tags: the series' own list. Known containers are tried one

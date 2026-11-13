@@ -26,6 +26,7 @@ import { LostJobError, flushEvents, log, logEvent, mt } from './montoon-api.mjs'
 import { DIRS, removeLocalChapter, translatedPages, uploadChapter } from './upload.mjs';
 import { stitchChapter } from './stitch.mjs';
 import { ensureTitleOnMontoon } from './title-maker.mjs';
+import { findByOtherNames } from './aliases.mjs';
 
 const WORKER = (process.env.WORKER_NAME || os.hostname()).replace(/[^\w.-]+/g, '-').slice(0, 56);
 const JOB_TTL = 900; // seconds a claimed job stays ours without a heartbeat
@@ -258,9 +259,11 @@ export async function resolveTitleRequest(query) {
     }
 
     const candidates = [];
+    const sites = [];
     for (const id of EPISODE_SITES.split(',')) {
         const site = await api('GET', `/api/v1/sources/${id}`).catch(() => null);
         if (!site) continue;
+        sites.push(site);
         const { matches, candidates: closest } = await findOnSource(site, query).catch(() => ({ matches: [], candidates: [] }));
         for (const match of matches) {
             const url = resultUrl(match.id, site);
@@ -268,6 +271,20 @@ export async function resolveTitleRequest(query) {
             if (chapters.length) return { site, url, title: match.title, chapters };
         }
         candidates.push(...closest.slice(0, 3).map(t => `${t} (${site.title})`));
+    }
+
+    // Under another name? (MangaUpdates knows them all.) Without a Montoon
+    // poster to compare, a hit counts only when one series answers to the name.
+    const other = await findByOtherNames({
+        names: [query], cover: null, tried: [query], sites,
+        read: readChapters,
+        search: async (site, name) => (await findOnSource(site, name)).matches,
+        toUrl: (match, site) => resultUrl(match.id, site),
+        say: text => log(text),
+    }).catch(() => null);
+    if (other?.url) return { site: other.site, url: other.url, title: other.title, chapters: other.chapters };
+    if (other?.candidates?.length) {
+        return { candidates: other.candidates, reason: `Found under other names, but several series are called "${query}": ${other.candidates.slice(0, 5).join(' · ')}. Paste the series link to pick one.` };
     }
     return { candidates };
 }
