@@ -21,12 +21,23 @@ const HARD_MAX = 12000;
 /** Montoon's per-episode file limit, with some room. */
 const MAX_PAGES = 280;
 
-/** Stitches every image in `srcDir` (reading order) into `destDir`. Returns { before, after }. */
-export async function stitchChapter(srcDir, destDir) {
+/**
+ * Stitches every image in `srcDir` (reading order) into `destDir`. Returns { before, after }.
+ * opts.keep: copy the images as they are (renumbered), unless the chapter is over the file limit.
+ */
+export async function stitchChapter(srcDir, destDir, opts = {}) {
     const files = readdirSync(srcDir).filter(f => IMAGE.test(f))
         .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
     mkdirSync(destDir, { recursive: true });
     if (!files.length) return { before: 0, after: 0 };
+
+    if (opts.keep && files.length <= MAX_PAGES) {
+        const digits = Math.max(2, String(files.length).length);
+        for (const [i, name] of files.entries()) {
+            copyFileSync(path.join(srcDir, name), path.join(destDir, `${String(i + 1).padStart(digits, '0')}${path.extname(name).toLowerCase()}`));
+        }
+        return { before: files.length, after: files.length };
+    }
 
     const pages = [];
     for (const name of files) {

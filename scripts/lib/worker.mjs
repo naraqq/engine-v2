@@ -592,12 +592,15 @@ function findIncomingChapter(root, number) {
  * strips into taller pages. Earlier tries' pages, rendered output and OCR cache
  * for that chapter are removed, since their page files no longer match.
  */
-async function placeChapter(found) {
+/** Sources whose images are uploaded as they are, not joined into tall pages. */
+const KEEP_IMAGES = new Set(['asurascans']);
+
+async function placeChapter(found, sourceId) {
     const dest = path.join(DIRS.downloads, found.series, found.chapter);
     for (const root of [DIRS.downloads, DIRS.translations, DIRS.work]) {
         rmSync(path.join(root, found.series, found.chapter), { recursive: true, force: true });
     }
-    const { before, after } = await stitchChapter(found.dir, dest);
+    const { before, after } = await stitchChapter(found.dir, dest, { keep: KEEP_IMAGES.has(sourceId) });
     if (after !== before) log(`  ${c.gray(`↳ Joined ${before} strips into ${after} pages`)}`);
     return dest;
 }
@@ -672,7 +675,7 @@ async function processJob(job, settings = null) {
         if (result.status !== 'completed') throw new Error(result.error || `Download ${result.status}`);
         const found = findIncomingChapter(incoming, p.chapter_number);
         if (!found) throw new Error(`Downloaded, but no chapter folder was written under ${incoming}.`);
-        const dir = await placeChapter(found);
+        const dir = await placeChapter(found, p.source_id);
         removeQuietly(incoming);
         const series = found.series;
         const chapter = found.chapter;
