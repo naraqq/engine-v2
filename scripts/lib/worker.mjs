@@ -218,6 +218,124 @@ async function requeueOrphanedPicks(registry, settings) {
     return created;
 }
 
+// ------------------------------------------------------- admin requests
+
+/** The engine source for a site's host name (any connector), or null. */
+async function sourceForUrl(url) {
+    const host = new URL(url).hostname.replace(/^www\./, '');
+    for (let page = 1; page < 20; page++) {
+        const batch = await api('GET', `/api/v1/sources?page=${page}&limit=100`);
+        const hit = batch.find(s => {
+            try { return new URL(s.url).hostname.replace(/^www\./, '') === host; } catch { return false; }
+        });
+        if (hit) return hit;
+        if (batch.length < 100) break;
+    }
+    if (/asuracomic\.net|asura\.gg|asuratoon\.com/.test(host)) return api('GET', '/api/v1/sources/asurascans');
+    return null;
+}
+
+/**
+ * Where a requested title lives: a pasted link, or an exact title match on
+ * the episode sites (whose page has chapters). Returns { site, url, title,
+ * chapters } or { candidates } when nothing matches.
+ */
+export async function resolveTitleRequest(query) {
+    const readChapters = async (site, url) => (await api('GET', `/api/v1/sources/${site.id}/manga/${encodeURIComponent(url)}/chapters`))
+        .map(ch => ({ ...ch, number: chapterNumber(ch) }))
+        .filter(ch => Number.isFinite(ch.number))
+        .sort((a, b) => a.number - b.number);
+
+    if (/^https?:\/\//i.test(query)) {
+        const site = await sourceForUrl(query);
+        if (!site) return { candidates: [], reason: `No connector for ${new URL(query).hostname}.` };
+        const u = new URL(query);
+        const url = new URL(u.pathname.replace(/\/+$/, '').replace(/\/chapter[-_/][^/]*$/i, '').replace(/\/+$/, ''), site.url).href;
+        const chapters = await readChapters(site, url);
+        if (!chapters.length) return { candidates: [], reason: `No chapters found at ${url}.` };
+        const info = await api('GET', `/api/v1/sources/${site.id}/info?url=${encodeURIComponent(url)}`).catch(() => null);
+        return { site, url, title: info?.title || decodeURIComponent(url.split('/').filter(Boolean).pop()), chapters };
+    }
+
+    const candidates = [];
+    for (const id of EPISODE_SITES.split(',')) {
+        const site = await api('GET', `/api/v1/sources/${id}`).catch(() => null);
+        if (!site) continue;
+        const { matches, candidates: closest } = await findOnSource(site, query).catch(() => ({ matches: [], candidates: [] }));
+        for (const match of matches) {
+            const url = resultUrl(match.id, site);
+            const chapters = await readChapters(site, url).catch(() => []);
+            if (chapters.length) return { site, url, title: match.title, chapters };
+        }
+        candidates.push(...closest.slice(0, 3).map(t => `${t} (${site.title})`));
+    }
+    return { candidates };
+}
+
+/** Pending "Translate a title" requests from admin: find, queue first, report. */
+async function handleTitleRequests(settings) {
+    let pending;
+    try {
+        pending = await mt('GET', '/title-requests/pending', undefined, { waitOffline: false });
+    } catch {
+        return; // backend without this feature, or offline
+    }
+    const priority = pending.priority || 200;
+    for (const r of pending.data || []) {
+        const report = body => mt('POST', `/title-requests/${r.id}`, { worker: WORKER, ...body }, { waitOffline: false }).catch(() => {});
+        say('');
+        log(c.bold(c.cyan(`▶ Admin asked to translate "${r.query}"`)));
+        try {
+            const found = await resolveTitleRequest(r.query);
+            if (!found.site) {
+                const message = found.reason || `No exact title match on ${EPISODE_SITES.replace(/,/g, ', ')}.`
+                    + (found.candidates?.length ? ` Closest: ${found.candidates.slice(0, 6).join(' · ')}. Paste the series link to be sure.` : ' Paste the series link instead.');
+                log(c.red(`  ✖ ${message}`));
+                await report({ status: 'not_found', message });
+                continue;
+            }
+
+            const montoon = await fetchMontoonTitles(montoonConfig(), '?renewed=all');
+            const existing = montoon.find(t => normalize(t.title) === normalize(found.title) || normalize(t.title_mn) === normalize(found.title));
+            if (existing) {
+                const message = `"${found.title}" is already on Montoon as #${existing.id}${existing.latest_episode !== null ? ` (up to episode ${existing.latest_episode})` : ''}. New episodes come through the normal check.`;
+                log(c.yellow(`  ↷ ${message}`));
+                await report({ status: 'exists', message, source_id: found.site.id, series_url: found.url, title: found.title, content_id: existing.id });
+                continue;
+            }
+
+            const saved = (await mt('POST', '/titles', {
+                items: [{
+                    source_id: found.site.id,
+                    series_url: found.url,
+                    title: found.title,
+                    origin: 'admin',
+                    decision: 'picked',
+                    reason: `Requested by ${r.requested_by || 'admin'}`,
+                    meta: { chapters: found.chapters.length, newest: found.chapters.at(-1)?.number, request_id: r.id },
+                }],
+            })).data[0];
+            const first = found.chapters.slice(0, r.chapters || settings.first_chapters);
+            const queued = await queueJobs(first.map(chapter => chapterJob({
+                site: found.site, url: found.url, chapter, title: found.title,
+                workerTitleId: saved.id, priority, reason: 'admin request',
+            })));
+            const message = `Found on ${found.site.title} (${found.chapters.length} chapters). Chapters ${first[0].number}–${first.at(-1).number} queued ahead of everything else.`;
+            log(c.green(`  ✔ "${found.title}": ${message}`));
+            logEvent('title_picked', `Admin request "${r.query}" → "${found.title}" on ${found.site.title}: ${count(first.length, 'chapter')} queued first`, {
+                data: { request_id: r.id, source_id: found.site.id, url: found.url },
+            });
+            await report({
+                status: 'queued', message, source_id: found.site.id, series_url: found.url, title: found.title,
+                worker_title_id: saved.id, jobs_queued: queued.created + queued.existing,
+            });
+        } catch (error) {
+            log(c.red(`  ✖ ${error.message}`));
+            await report({ status: 'failed', message: String(error.message).slice(0, 900) });
+        }
+    }
+}
+
 async function planNewTitles(settings) {
     const registry = await mt('GET', '/titles?limit=2000');
     const requeued = await requeueOrphanedPicks(registry, settings);
@@ -714,7 +832,7 @@ export async function runWorker(opts) {
 
     const stopEngine = await ensureServer();
     writePidFile();
-    let idle = false, paused = false, done = 0;
+    let idle = false, paused = false, done = 0, lastRequestCheck = 0;
     logEvent('worker', `${WORKER} started${opts.noPlan ? ' (jobs only, no planning)' : ''}`);
     try {
         for (;;) {
@@ -730,6 +848,12 @@ export async function runWorker(opts) {
 
             if (!opts.noPlan) {
                 await maybePlan(settings, opts).catch(error => log(c.red(`✖ Planning failed: ${error.message}`)));
+            }
+
+            // Admin "Translate a title" requests: checked every 2 minutes, between jobs.
+            if (Date.now() - lastRequestCheck >= 120_000) {
+                lastRequestCheck = Date.now();
+                await handleTitleRequests(settings).catch(error => log(c.red(`✖ Title requests failed: ${error.message}`)));
             }
 
             const claimed = await mt('POST', '/jobs/claim', { worker: WORKER, limit: 1, ttl: JOB_TTL });
