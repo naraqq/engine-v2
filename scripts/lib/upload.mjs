@@ -13,7 +13,7 @@
 import path from 'node:path';
 import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { ROOT, c, sleep, status } from './cli.mjs';
-import { log, mt } from './montoon-api.mjs';
+import { log, mt, workerName } from './montoon-api.mjs';
 
 const STORAGE = process.env.STORAGE_PATH ? path.resolve(ROOT, process.env.STORAGE_PATH) : path.join(ROOT, 'storage');
 export const DIRS = {
@@ -110,6 +110,7 @@ export async function uploadChapter({ series, chapter, contentId, episodeNumber,
         episode_number: number,
         title,
         paths: prepared.files.map(f => f.path),
+        worker: workerName(),
     }, { waitOffline: false })).data;
     log(`${indent}${c.green(`✔ Created episode #${episode.episode_id} "${episode.title}"`)} ${c.gray('as an unreleased draft. Release or schedule it in Montoon admin.')}`);
 

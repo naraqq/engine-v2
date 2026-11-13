@@ -8,7 +8,7 @@
 import sharp from 'sharp';
 import { api, c, normalize, status } from './cli.mjs';
 import { fetchMontoonTitles, findOnSource, montoonConfig, resultUrl } from './montoon.mjs';
-import { log, mt } from './montoon-api.mjs';
+import { log, mt, workerName } from './montoon-api.mjs';
 
 const TYPES = ['manga', 'manhwa', 'manhua'];
 const STATUSES = ['ongoing', 'completed', 'hiatus'];
@@ -294,6 +294,7 @@ export async function ensureTitleOnMontoon({ workerTitleId, sourceId, seriesUrl,
     for (const [name, value] of Object.entries(fields)) if (value !== '') form.append(name, String(value));
     for (const alt of String(info.alternative || '').split(/[,;/|]/).map(s => s.trim()).filter(Boolean).slice(0, 20)) form.append('alt_titles[]', alt.slice(0, 120));
     for (const id of meta.genre_ids) form.append('genre_ids[]', String(id));
+    form.append('worker', workerName());
     form.append('cover', new Blob([posters.cover], { type: 'image/jpeg' }), 'cover.jpg');
     form.append('landscape', new Blob([posters.landscape], { type: 'image/jpeg' }), 'landscape.jpg');
 

@@ -3,6 +3,7 @@
  * and the upload command. Network trouble and server hiccups are waited out
  * (checked every 30 s) instead of crashing, unless waitOffline is false.
  */
+import os from 'node:os';
 import { c, say, sleep } from './cli.mjs';
 import { montoonConfig } from './montoon.mjs';
 
@@ -67,3 +68,35 @@ export async function mt(method, route, body, { waitOffline = true } = {}) {
     }
 }
 
+
+// ------------------------------------------------------------- activity
+
+/** This PC's worker name (same rule as the worker uses). */
+export const workerName = () => (process.env.WORKER_NAME || os.hostname()).replace(/[^\w.-]+/g, '-').slice(0, 56);
+
+const pendingEvents = [];
+let flushTimer = null;
+
+/**
+ * Adds a line to Montoon's activity timeline (/admin/activity). Sent in
+ * batches in the background; never throws and never blocks the work. When
+ * Montoon can't be reached, events wait (up to 200) for the next try.
+ */
+export function logEvent(type, message, extra = {}) {
+    pendingEvents.push({ type, message: String(message).slice(0, 1000), ...extra });
+    if (pendingEvents.length > 200) pendingEvents.splice(0, pendingEvents.length - 200);
+    flushTimer ??= setTimeout(() => { flushTimer = null; flushEvents().catch(() => {}); }, 2000);
+}
+
+/** Sends what is waiting now (e.g. before the worker exits). */
+export async function flushEvents() {
+    while (pendingEvents.length) {
+        const batch = pendingEvents.slice(0, 50);
+        try {
+            await mt('POST', '/events', { worker: workerName(), events: batch }, { waitOffline: false });
+            pendingEvents.splice(0, batch.length);
+        } catch {
+            return; // offline or backend not deployed yet: keep them for later
+        }
+    }
+}

@@ -22,7 +22,7 @@ import path from 'node:path';
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { ROOT, api, c, chapterNumber, childPids, ensureServer, follow, killChildren, killTree, normalize, say, sleep, status, track } from './cli.mjs';
 import { fetchMontoonTitles, findOnSource, montoonConfig, resultUrl, syncMontoon } from './montoon.mjs';
-import { LostJobError, log, mt } from './montoon-api.mjs';
+import { LostJobError, flushEvents, log, logEvent, mt } from './montoon-api.mjs';
 import { DIRS, removeLocalChapter, translatedPages, uploadChapter } from './upload.mjs';
 import { stitchChapter } from './stitch.mjs';
 import { ensureTitleOnMontoon } from './title-maker.mjs';
@@ -65,6 +65,18 @@ async function maybePlan(settings, opts) {
         worker: WORKER,
         value: { last_run: new Date().toISOString(), by: WORKER, summary },
     });
+    const ep = summary.episodes, nt = summary.new_titles;
+    const parts = [];
+    if (ep) {
+        parts.push(`${count(ep.titles ?? 0, 'title')} with ${count(ep.episodes ?? 0, 'new episode')} queued`);
+        if (ep.not_found) parts.push(`${ep.not_found} not found${ep.not_found_titles?.length ? ` (${ep.not_found_titles.slice(0, 5).join(', ')})` : ''}`);
+        if (ep.failed) parts.push(`${ep.failed} couldn't be checked`);
+        if (ep.removed_jobs) parts.push(`${count(ep.removed_jobs, 'outdated job')} removed`);
+    } else {
+        parts.push('episode check failed');
+    }
+    if (nt) parts.push(nt.picked ? `${count(nt.picked, 'new title')} picked` : 'no new titles picked');
+    logEvent('plan', `Plan: ${parts.join('; ')}`, { level: ep ? 'info' : 'error', data: summary });
     log(c.bold(c.cyan('▶ Planning done. Back to downloading.')));
     say('');
 }
@@ -272,6 +284,12 @@ async function planNewTitles(settings) {
         const picked = pickedUrls.has(r.entry.url);
         const line = `${picked ? c.green('★ Picked') : c.gray('· Passed')} ${c.bold(r.entry.title)} ${c.gray(`(${r.entry.site.title}, ${r.entry.chapterCount} ch, score ${Math.round(r.score)})`)}`;
         log(`  ${line}${r.reason ? c.gray(` ${r.reason}`) : ''}`);
+    }
+
+    for (const r of ranked.filter(r => pickedUrls.has(r.entry.url))) {
+        logEvent('title_picked', `Picked "${r.entry.title}" (${r.entry.site.title}, ${r.entry.chapterCount} chapters, score ${Math.round(r.score)})${r.reason ? `: ${r.reason}` : ''}`, {
+            data: { source_id: r.entry.site.id, url: r.entry.url, origins: r.entry.origins, requests: r.entry.requests, trending_rank: r.entry.trendingRank, ranked_by: r.by },
+        });
     }
 
     let queued = 0;
@@ -664,6 +682,7 @@ export async function runWorker(opts) {
     const stopEngine = await ensureServer();
     writePidFile();
     let idle = false, paused = false, done = 0;
+    logEvent('worker', `${WORKER} started${opts.noPlan ? ' (jobs only, no planning)' : ''}`);
     try {
         for (;;) {
             const settings = (await mt('POST', '/heartbeat', { worker: WORKER, info: { platform: process.platform, done } })).data.settings;
@@ -694,6 +713,8 @@ export async function runWorker(opts) {
         }
     } finally {
         stopEngine();
+        logEvent('worker', `${WORKER} stopped after ${count(done, 'chapter')} this session`);
+        await flushEvents().catch(() => {});
     }
     log(c.bold(`Stopped. ${count(done, 'chapter')} done this session.`));
 }
