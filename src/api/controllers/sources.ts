@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { engineService } from '../services/engine.service.js';
 import type { ApiResponse, SourceInfo, MangaInfo, ChapterInfo, SearchQuery } from '../types/responses.js';
 import { logger } from '../../config/logger.js';
+import { fetchMangaPageInfo } from '../services/manga-info.js';
 
 /**
  * Get all manga sources
@@ -136,6 +137,20 @@ export async function getManga(req: Request, res: Response): Promise<void> {
     };
 
     res.json(response);
+}
+
+/**
+ * What a series page says about itself (title, synopsis, poster, genres,
+ * status, author, alternative titles): ?url=<series url>
+ */
+export async function mangaInfo(req: Request, res: Response): Promise<void> {
+    const url = String(req.query.url || '');
+    if (!/^https?:\/\//i.test(url)) {
+        res.status(400).json({ success: false, error: { code: 'BAD_REQUEST', message: 'Pass the series page as ?url=https://…' } });
+        return;
+    }
+    const info = await fetchMangaPageInfo(url);
+    res.json({ success: true, data: { sourceId: req.params.sourceId, ...info } });
 }
 
 /**

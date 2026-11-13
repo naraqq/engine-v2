@@ -37,6 +37,16 @@ router.get(
 );
 
 /**
+ * GET /api/v1/sources/:sourceId/info?url=<series url>
+ * Series metadata from its page: synopsis, poster, genres, status, author
+ */
+router.get(
+    '/:sourceId/info',
+    validate(schemas.sourceIdParam, 'params'),
+    asyncHandler(sourcesController.mangaInfo)
+);
+
+/**
  * GET /api/v1/sources/:sourceId/discover?list=trending|latest
  * Series the site promotes: trending now, or updated most recently
  */

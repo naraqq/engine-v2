@@ -25,6 +25,7 @@ import { fetchMontoonTitles, findOnSource, montoonConfig, resultUrl, syncMontoon
 import { LostJobError, log, mt } from './montoon-api.mjs';
 import { DIRS, removeLocalChapter, translatedPages, uploadChapter } from './upload.mjs';
 import { stitchChapter } from './stitch.mjs';
+import { ensureTitleOnMontoon } from './title-maker.mjs';
 
 const WORKER = (process.env.WORKER_NAME || os.hostname()).replace(/[^\w.-]+/g, '-').slice(0, 56);
 const JOB_TTL = 900; // seconds a claimed job stays ours without a heartbeat
@@ -282,7 +283,9 @@ async function planNewTitles(settings) {
             chapter,
             title: pick.entry.title,
             workerTitleId: idByUrl.get(pick.entry.url) ?? null,
-            priority: 5,
+            // Above the episodes of less-read series, so a new title gets
+            // its first chapters within hours instead of after the backlog.
+            priority: 60,
             reason: 'new title',
         })));
         queued += result.created;
@@ -471,7 +474,7 @@ function translateChapter(series, chapter) {
 
 let currentJob = null;
 
-async function processJob(job) {
+async function processJob(job, settings = null) {
     currentJob = job;
     const p = job.payload;
     say('');
@@ -515,10 +518,20 @@ async function processJob(job) {
         log(`  ${c.gray(`↳ Translated in ${Math.round((Date.now() - translateStarted) / 1000)} s`)}`);
         if (lost) throw new LostJobError('Lease lost while translating.');
 
-        // 3. Upload as an unreleased draft episode, or keep (new titles).
+        // 3. Upload as an unreleased draft episode. A new title is first
+        //    added to Montoon (house content, with metadata and posters).
         let summary;
-        if (job.content_id) {
-            const uploaded = await uploadChapter({ series, chapter, contentId: job.content_id, episodeNumber: p.chapter_number });
+        let contentId = job.content_id;
+        if (!contentId && job.worker_title_id && settings?.auto_create_titles !== false) {
+            contentId = await ensureTitleOnMontoon({
+                workerTitleId: job.worker_title_id,
+                sourceId: p.source_id,
+                seriesUrl: p.series_url,
+                title: p.title,
+            });
+        }
+        if (contentId) {
+            const uploaded = await uploadChapter({ series, chapter, contentId, episodeNumber: p.chapter_number });
             if (uploaded.exists) {
                 removeLocalChapter(series, chapter);
                 summary = { worker: WORKER, skipped: 'episode already on Montoon' };
@@ -677,7 +690,7 @@ export async function runWorker(opts) {
                 continue;
             }
             idle = false;
-            if (await processJob(job)) done++;
+            if (await processJob(job, settings)) done++;
         }
     } finally {
         stopEngine();

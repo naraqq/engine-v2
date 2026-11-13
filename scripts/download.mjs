@@ -36,6 +36,10 @@ const HELP = `Download a series, what's trending, or new episodes for Montoon.
                                         as an unreleased draft, then delete its local folders
                                         (--episode <n> to set the number, --keep to keep files)
 
+  download --preview-title asurascans <series url>
+                                        what the worker would create on Montoon for a new
+                                        title: metadata, cover and banner (storage/title-previews)
+
   download --work                       nonstop worker: plans, downloads, translates, uploads
   download --work --once                plan now, work through the queue, then exit
   download --work --no-plan             only take jobs, never plan
@@ -59,7 +63,7 @@ Options
 
 function parseArgs(argv) {
     const opts = { format: 'images', from: 'asurascans,manga18fx,weebcentral,mangaread', words: [] };
-    const takesValue = new Set(['source', 'latest', 'chapters', 'format', 'out', 'only', 'link', 'unlink', 'from', 'limit', 'upload', 'to', 'episode', 'title']);
+    const takesValue = new Set(['source', 'latest', 'chapters', 'format', 'out', 'only', 'link', 'unlink', 'from', 'limit', 'upload', 'preview-title', 'to', 'episode', 'title']);
     const flags = {
         help: 'help', list: 'list', all: 'all', 'dry-run': 'dryRun', montoon: 'montoon',
         work: 'work', once: 'once', keep: 'keep', 'no-plan': 'noPlan', plan: 'planNow', status: 'status', pause: 'pause', resume: 'resume', stop: 'stop',
@@ -210,6 +214,7 @@ async function main() {
     if (opts.source === 'montoon') opts.montoon = true;
     if (opts.montoon && opts.source === 'montoon') delete opts.source;
     if (opts.upload !== undefined) return uploadCommand(opts);
+    if (opts['preview-title'] !== undefined) return previewTitleCommand(opts);
     if (opts.stop) return stopLocalWorker();
     if (opts.work) {
         if (opts.status) return workerStatus();
@@ -267,4 +272,24 @@ async function uploadCommand(opts) {
         indent: '',
     });
     if (result.exists) process.exitCode = 1;
+}
+
+/** download --preview-title <source> <series url> */
+async function previewTitleCommand(opts) {
+    const sourceId = opts['preview-title'];
+    const seriesUrl = opts.words[0];
+    if (!sourceId || !/^https?:\/\//.test(seriesUrl || '')) fail('Usage: download --preview-title <source> <series url>');
+    const { previewTitle } = await import('./lib/title-maker.mjs');
+    const stop = await ensureServer();
+    try {
+        const outDir = path.join(ROOT, 'storage', 'title-previews', (new URL(seriesUrl).pathname.split('/').filter(Boolean).pop() || 'title').replace(/[^\w.-]+/g, '-'));
+        const { info, meta, image } = await previewTitle({ sourceId, seriesUrl, title: opts.title, outDir });
+        say(`${info.title}  →  ${meta.title_mn || '(no Mongolian title)'}`);
+        say(`  ${meta.type} · ${meta.status} · ${meta.age_limit}+ · metadata by ${meta.by}`);
+        say(`  cover ${image.width}×${image.height} from ${image.url}`);
+        say(`  ${meta.description_mn}`);
+        say(`Saved cover.jpg, landscape.jpg and metadata.json to ${outDir}`);
+    } finally {
+        stop();
+    }
 }
