@@ -72,6 +72,8 @@ const INFO_SCRIPT = `
             const slot = el && el.closest && el.closest('[itemprop="image"], .thumb, .summary_image, .series-thumb, .infomanga .thumb') ? 30 : 1;
             if (el && !w) { w = Number(el.getAttribute('width')) || 0; h = Number(el.getAttribute('height')) || 0; }
             const ratio = w && h ? h / w : 0;
+            // A landscape image is a banner, even when named after the series (Asura's /banners/<slug>).
+            if (ratio && ratio < 1) return;
             if (!own && slot === 1 && (w < 150 || h < 200 || ratio < 1.15 || ratio > 1.9)) return;
             const alt = ((el && el.alt) || '').toLowerCase();
             const score = slot * (own ? 50 : 1) * (words.some(word => alt.includes(word)) ? 4 : 1)

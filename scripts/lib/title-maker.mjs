@@ -46,7 +46,9 @@ export async function coverFrom(info, pageUrl) {
 
 /** Best cover: the source's own, or a bigger one from another site carrying the same title. */
 async function bestCover(info, pageUrl, title, sourceId) {
-    let best = await coverFrom(info, pageUrl);
+    // A landscape image is a site banner, not a poster.
+    const portrait = image => (image && image.height >= image.width ? image : null);
+    let best = portrait(await coverFrom(info, pageUrl));
     if (best && best.width >= 450) return best;
     for (const id of ['asurascans', 'weebcentral']) {
         if (id === sourceId) continue;
@@ -56,7 +58,7 @@ async function bestCover(info, pageUrl, title, sourceId) {
             if (!matches?.length) continue;
             const url = resultUrl(matches[0].id, site);
             const other = await api('GET', `/api/v1/sources/${id}/info?url=${encodeURIComponent(url)}`);
-            const image = await coverFrom(other, url);
+            const image = portrait(await coverFrom(other, url));
             if (image && (!best || image.width > best.width)) best = image;
             if (best && best.width >= 450) break;
         } catch { /* try the next site */ }
@@ -73,11 +75,12 @@ async function makePosters(buffer) {
     const W = 1280, H = 720, fgH = 620;
     const background = await sharp(buffer).resize(W, H, { fit: 'cover', position: 'attention' })
         .blur(30).modulate({ brightness: 0.5, saturation: 1.1 }).toBuffer();
-    const foreground = await sharp(buffer).resize({ height: fgH, kernel: 'lanczos3' }).toBuffer();
-    const fgW = (await sharp(foreground).metadata()).width;
+    // Fit inside the banner (a wide image would overflow it and sharp throws).
+    const foreground = await sharp(buffer).resize({ width: W - 400, height: fgH, fit: 'inside', kernel: 'lanczos3' }).toBuffer();
+    const { width: fgW, height: fgHActual } = await sharp(foreground).metadata();
     const left = W - fgW - 110; // right side: the app draws the title over the left
-    const top = Math.round((H - fgH) / 2);
-    const shadow = await sharp({ create: { width: fgW + 60, height: fgH + 60, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0.55 } } })
+    const top = Math.round((H - fgHActual) / 2);
+    const shadow = await sharp({ create: { width: fgW + 60, height: fgHActual + 60, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0.55 } } })
         .blur(22).png().toBuffer();
     const landscape = await sharp(background)
         .composite([
