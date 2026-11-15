@@ -11,7 +11,7 @@ import { config } from '../config/settings.js';
 import { logger } from '../config/logger.js';
 import { usage } from './gemini.js';
 import { closeOcr } from './ocr.js';
-import { listChapters, listSeries, processChapter } from './pipeline.js';
+import { listChapters, listSeries, processChapters } from './pipeline.js';
 
 const args = process.argv.slice(2);
 const flags = new Set(args.filter(a => a.startsWith('--')));
@@ -26,14 +26,13 @@ async function main() {
 
     const targets = chapters.length ? chapters : await listChapters(series);
     const started = Date.now();
-    for (const chapter of targets) {
-        await processChapter(series, chapter, {
-            force: flags.has('--force'),
-            detectOnly: flags.has('--detect-only'),
-            retranslate: flags.has('--retranslate'),
-            noRender: flags.has('--no-render'),
-        });
-    }
+    // Chapters are translated together (in order), so context carries from one to the next.
+    await processChapters(series, targets, {
+        force: flags.has('--force'),
+        detectOnly: flags.has('--detect-only'),
+        retranslate: flags.has('--retranslate'),
+        noRender: flags.has('--no-render'),
+    });
 
     await closeOcr();
     logger.info(`Finished ${targets.length} chapter(s) in ${Math.round((Date.now() - started) / 1000)}s (OCR: ${config.translator.ocrProvider}, thinking budget: ${config.translator.thinkingBudget})`);

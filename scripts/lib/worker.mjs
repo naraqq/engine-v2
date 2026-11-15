@@ -35,6 +35,13 @@ const EPISODE_SITES = 'asurascans,manga18fx,weebcentral,mangaread,kingofshojo';
 
 const count = (n, one, many = one + 's') => `${n} ${n === 1 ? one : many}`;
 
+/**
+ * How many chapters of a new title to queue up front: enough for its launch
+ * (Montoon holds a new title until launch_episodes are translated, then
+ * releases launch_drop of them at once), never fewer than first_chapters.
+ */
+const firstChapterCount = settings => Math.max(settings.first_chapters || 0, settings.launch_episodes || 0) || 5;
+
 // ---------------------------------------------------------------- planner
 
 async function maybePlan(settings, opts) {
@@ -203,7 +210,7 @@ async function requeueOrphanedPicks(registry, settings) {
                 .map(ch => ({ ...ch, number: chapterNumber(ch) }))
                 .filter(ch => Number.isFinite(ch.number))
                 .sort((a, b) => a.number - b.number)
-                .slice(0, settings.first_chapters);
+                .slice(0, firstChapterCount(settings));
             const result = await queueJobs(first.map(chapter => chapterJob({
                 site, url, chapter, title: t.title, workerTitleId: t.id, priority: 60, reason: 'new title',
             })));
@@ -332,7 +339,7 @@ async function handleTitleRequests(settings) {
                     meta: { chapters: found.chapters.length, newest: found.chapters.at(-1)?.number, request_id: r.id },
                 }],
             })).data[0];
-            const first = found.chapters.slice(0, r.chapters || settings.first_chapters);
+            const first = found.chapters.slice(0, r.chapters || firstChapterCount(settings));
             const queued = await queueJobs(first.map(chapter => chapterJob({
                 site: found.site, url: found.url, chapter, title: found.title,
                 workerTitleId: saved.id, priority, reason: 'admin request',
@@ -462,7 +469,7 @@ async function planNewTitles(settings) {
 
     let queued = 0;
     for (const pick of picks) {
-        const first = pick.entry.chapters.slice(0, settings.first_chapters);
+        const first = pick.entry.chapters.slice(0, firstChapterCount(settings));
         const result = await queueJobs(first.map(chapter => chapterJob({
             site: pick.entry.site,
             url: pick.entry.url,
@@ -626,9 +633,9 @@ async function placeChapter(found, sourceId) {
  * Runs the translator on one downloaded chapter (OCR on this PC's GPU, then
  * Gemini). Its main steps are shown in the worker log.
  */
-function translateChapter(series, chapter) {
+function translateChapters(series, chapters) {
     return new Promise((resolve, reject) => {
-        const child = track(spawn(process.execPath, ['--no-warnings', '--import', 'tsx', 'src/translator/cli.ts', series, chapter], {
+        const child = track(spawn(process.execPath, ['--no-warnings', '--import', 'tsx', 'src/translator/cli.ts', series, ...chapters], {
             cwd: ROOT,
             env: process.env,
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -647,7 +654,7 @@ function translateChapter(series, chapter) {
                 const msg = m[2].replace(/^\[[^\]]+\]\s*/, '');
                 if (m[1] === 'error') lastError = msg;
                 if (/^OCR \S+: \d+/.test(msg)) status(`  ${c.gray(`↳ ${msg}`)}`);
-                else if (/OCR done|translating|polish pass|^blocks:|rendered|still untranslated/.test(msg) || m[1] !== 'info') {
+                else if (/OCR done|skipped locally|translating|translated in|polish pass|^blocks:|rendered|still untranslated|calls,/.test(msg) || m[1] !== 'info') {
                     log(`  ${m[1] === 'info' ? c.gray(`↳ ${msg}`) : c.yellow(`⚠ ${msg}`)}`);
                 }
             }
@@ -661,94 +668,151 @@ function translateChapter(series, chapter) {
     });
 }
 
-let currentJob = null;
+/**
+ * Chapters claimed at once. A title's chapters in one claim are translated
+ * together (fewer requests, and context carries from chapter to chapter).
+ */
+const BATCH_CHAPTERS = Math.min(10, Math.max(1, Number(process.env.WORKER_BATCH_CHAPTERS) || 5));
 
-async function processJob(job, settings = null) {
-    currentJob = job;
+/** Jobs this worker holds right now (handed back on Ctrl+C). */
+let currentJobs = [];
+
+/** Downloads one job's chapter into storage/downloads. Returns { series, chapter }. */
+async function downloadJob(job) {
     const p = job.payload;
-    say('');
-    log(`${c.bold(c.cyan('⬇'))} ${c.bold(p.title)} chapter ${c.bold(p.chapter_number)} ${c.gray(`from ${p.source_id} · job #${job.id} · ${p.reason} · try ${job.attempts}/${job.max_attempts}`)}`);
+    await ensureServer();
+    const incoming = path.join(INCOMING, String(job.id));
+    removeQuietly(incoming);
+    const download = await api('POST', '/api/v1/downloads', {
+        sourceId: p.source_id,
+        mangaUrl: p.series_url,
+        chapterIds: [p.chapter_id],
+        format: 'images',
+        downloadPath: incoming,
+    });
+    const [result] = await follow([download.id], p.title, '  ');
+    if (result.status !== 'completed') throw new Error(result.error || `Download ${result.status}`);
+    const found = findIncomingChapter(incoming, p.chapter_number);
+    if (!found) throw new Error(`Downloaded, but no chapter folder was written under ${incoming}.`);
+    await placeChapter(found, p.source_id);
+    removeQuietly(incoming);
+    return { series: found.series, chapter: found.chapter };
+}
 
-    let lost = false;
-    const keepAlive = setInterval(() => {
-        mt('POST', `/jobs/${job.id}/heartbeat`, { worker: WORKER, ttl: JOB_TTL }, { waitOffline: false })
-            .catch(error => { if (error.lost) lost = true; });
-    }, 120_000);
-    mt('POST', '/heartbeat', { worker: WORKER, info: { current: `${p.title} ch ${p.chapter_number}` } }, { waitOffline: false }).catch(() => {});
+/** Uploads one translated chapter as an unreleased draft episode and completes its job. */
+async function uploadJob(job, series, chapter, settings) {
+    const p = job.payload;
+    const { dir: translatedDir, files } = translatedPages(series, chapter);
+    if (!files.length) throw new Error('The translator produced no pages.');
 
-    try {
-        // 1. Download.
-        await ensureServer();
-        const incoming = path.join(INCOMING, String(job.id));
-        removeQuietly(incoming);
-        const download = await api('POST', '/api/v1/downloads', {
+    // A new title is first added to Montoon (house content, with metadata and posters).
+    let summary;
+    let contentId = job.content_id;
+    if (!contentId && job.worker_title_id && settings?.auto_create_titles !== false) {
+        contentId = await ensureTitleOnMontoon({
+            workerTitleId: job.worker_title_id,
             sourceId: p.source_id,
-            mangaUrl: p.series_url,
-            chapterIds: [p.chapter_id],
-            format: 'images',
-            downloadPath: incoming,
+            seriesUrl: p.series_url,
+            title: p.title,
         });
-        const [result] = await follow([download.id], p.title, '  ');
-        if (result.status !== 'completed') throw new Error(result.error || `Download ${result.status}`);
-        const found = findIncomingChapter(incoming, p.chapter_number);
-        if (!found) throw new Error(`Downloaded, but no chapter folder was written under ${incoming}.`);
-        const dir = await placeChapter(found, p.source_id);
-        removeQuietly(incoming);
-        const series = found.series;
-        const chapter = found.chapter;
-        if (lost) throw new LostJobError('Lease lost while downloading.');
-
-        // 2. Translate.
-        log(`  ${c.cyan('✎')} Translating ${series} ${chapter}…`);
-        const translateStarted = Date.now();
-        await translateChapter(series, chapter);
-        const { dir: translatedDir, files } = translatedPages(series, chapter);
-        if (!files.length) throw new Error('The translator produced no pages.');
-        log(`  ${c.gray(`↳ Translated in ${Math.round((Date.now() - translateStarted) / 1000)} s`)}`);
-        if (lost) throw new LostJobError('Lease lost while translating.');
-
-        // 3. Upload as an unreleased draft episode. A new title is first
-        //    added to Montoon (house content, with metadata and posters).
-        let summary;
-        let contentId = job.content_id;
-        if (!contentId && job.worker_title_id && settings?.auto_create_titles !== false) {
-            contentId = await ensureTitleOnMontoon({
-                workerTitleId: job.worker_title_id,
-                sourceId: p.source_id,
-                seriesUrl: p.series_url,
-                title: p.title,
-            });
-        }
-        if (contentId) {
-            const uploaded = await uploadChapter({ series, chapter, contentId, episodeNumber: p.chapter_number });
-            if (uploaded.exists) {
-                removeLocalChapter(series, chapter);
-                summary = { worker: WORKER, skipped: 'episode already on Montoon' };
-            } else {
-                summary = { worker: WORKER, title: series, episode_id: uploaded.episodeId, pages: uploaded.pages, bytes: uploaded.bytes };
-            }
+    }
+    if (contentId) {
+        const uploaded = await uploadChapter({ series, chapter, contentId, episodeNumber: p.chapter_number });
+        if (uploaded.exists) {
+            removeLocalChapter(series, chapter);
+            summary = { worker: WORKER, skipped: 'episode already on Montoon' };
         } else {
-            log(`  ${c.gray(`↳ New title, not on Montoon yet: kept in ${translatedDir}`)}`);
-            summary = { worker: WORKER, title: series, pages: files.length, local_dir: translatedDir };
+            summary = { worker: WORKER, title: series, episode_id: uploaded.episodeId, pages: uploaded.pages, bytes: uploaded.bytes };
+        }
+    } else {
+        log(`  ${c.gray(`↳ New title, not on Montoon yet: kept in ${translatedDir}`)}`);
+        summary = { worker: WORKER, title: series, pages: files.length, local_dir: translatedDir };
+    }
+    await mt('POST', `/jobs/${job.id}/complete`, { worker: WORKER, result: summary });
+    log(c.green(`  ✔ ${p.title} chapter ${p.chapter_number} done (job #${job.id}).`));
+    return contentId;
+}
+
+/**
+ * One claim of jobs: download each chapter, translate each title's chapters
+ * together (one translator run, chapters in order), then upload them one by
+ * one. A job that fails is reported on its own; the rest carry on.
+ * Returns the number of chapters finished.
+ */
+async function processBatch(jobs, settings = null) {
+    currentJobs = [...jobs];
+    const lost = new Set();
+    const keepAlive = setInterval(() => {
+        for (const job of currentJobs) {
+            mt('POST', `/jobs/${job.id}/heartbeat`, { worker: WORKER, ttl: JOB_TTL }, { waitOffline: false })
+                .catch(error => { if (error.lost) lost.add(job.id); });
+        }
+    }, 120_000);
+    const titles = [...new Set(jobs.map(j => j.payload.title))];
+    mt('POST', '/heartbeat', { worker: WORKER, info: { current: `${titles.join(', ')} (${count(jobs.length, 'chapter')})` } }, { waitOffline: false }).catch(() => {});
+
+    const release = job => { currentJobs = currentJobs.filter(j => j.id !== job.id); };
+    const fail = async (job, error) => {
+        release(job);
+        if (error.lost || lost.has(job.id)) {
+            log(c.yellow(`  ↷ Job #${job.id}: another worker took it over (our lease expired).`));
+            return;
+        }
+        log(c.red(`  ✖ ${job.payload.title} chapter ${job.payload.chapter_number}: ${error.message}`));
+        await mt('POST', `/jobs/${job.id}/fail`, { worker: WORKER, error: String(error.message).slice(0, 1900) })
+            .then(r => log(c.gray(r.data.status === 'failed' ? '  ↳ Out of attempts; marked failed.' : '  ↳ Will be retried later.')))
+            .catch(() => {});
+    };
+
+    let done = 0;
+    try {
+        // 1. Download every chapter.
+        const ready = [];
+        for (const job of jobs) {
+            const p = job.payload;
+            say('');
+            log(`${c.bold(c.cyan('⬇'))} ${c.bold(p.title)} chapter ${c.bold(p.chapter_number)} ${c.gray(`from ${p.source_id} · job #${job.id} · ${p.reason} · try ${job.attempts}/${job.max_attempts}`)}`);
+            try {
+                ready.push({ job, ...(await downloadJob(job)) });
+            } catch (error) {
+                await fail(job, error);
+            }
         }
 
-        await mt('POST', `/jobs/${job.id}/complete`, { worker: WORKER, result: summary });
-        log(c.green(`  ✔ Job #${job.id} done.`));
-        return true;
-    } catch (error) {
-        if (error.lost) {
-            log(c.yellow('  ↷ Another worker took this job over (our lease expired). Moving on.'));
-            return false;
+        // 2. Translate each title's chapters together, in chapter order; 3. upload them.
+        const bySeries = new Map();
+        for (const item of ready) bySeries.set(item.series, [...(bySeries.get(item.series) || []), item]);
+        for (const [series, items] of bySeries) {
+            items.sort((a, b) => Number(a.job.payload.chapter_number) - Number(b.job.payload.chapter_number));
+            say('');
+            log(`  ${c.cyan('✎')} Translating ${series}: ${items.map(i => i.chapter).join(', ')}…`);
+            const started = Date.now();
+            try {
+                await translateChapters(series, items.map(i => i.chapter));
+            } catch (error) {
+                for (const { job } of items) await fail(job, error);
+                continue;
+            }
+            log(`  ${c.gray(`↳ Translated ${count(items.length, 'chapter')} in ${Math.round((Date.now() - started) / 1000)} s`)}`);
+
+            let contentId = null;
+            for (const { job, chapter } of items) {
+                try {
+                    if (lost.has(job.id)) throw new LostJobError('Lease lost while translating.');
+                    // The title is created with the first chapter; the rest of the batch joins it.
+                    contentId = await uploadJob(contentId && !job.content_id ? { ...job, content_id: contentId } : job, series, chapter, settings);
+                    release(job);
+                    done++;
+                } catch (error) {
+                    await fail(job, error);
+                }
+            }
         }
-        log(c.red(`  ✖ ${error.message}`));
-        await mt('POST', `/jobs/${job.id}/fail`, { worker: WORKER, error: String(error.message).slice(0, 1900) })
-            .then(r => log(c.gray(r.data.status === 'failed'
-                ? '  ↳ Out of attempts; marked failed.'
-                : '  ↳ Will be retried later.')))
-            .catch(() => {});
-        return false;
+        return done;
     } finally {
-        currentJob = null;
+        // Anything not reported yet (e.g. an unexpected error) goes back to the queue.
+        for (const job of currentJobs) await fail(job, new Error('Batch stopped before this chapter finished.'));
+        currentJobs = [];
         clearInterval(keepAlive);
         mt('POST', '/heartbeat', { worker: WORKER, info: { current: null } }, { waitOffline: false }).catch(() => {});
     }
@@ -805,13 +869,13 @@ function installStopHandler() {
         say('');
         log(c.yellow(`Stopping now (${signal})…`));
         killChildren();
-        const job = currentJob;
-        if (job) {
+        const jobs = currentJobs;
+        if (jobs.length) {
             // Back to the queue right away instead of after the lease expires.
             await Promise.race([
-                mt('POST', `/jobs/${job.id}/fail`, { worker: WORKER, error: `Stopped on ${WORKER} (${signal}).` }, { waitOffline: false })
+                Promise.all(jobs.map(job => mt('POST', `/jobs/${job.id}/fail`, { worker: WORKER, error: `Stopped on ${WORKER} (${signal}).` }, { waitOffline: false })
                     .then(() => log(c.gray(`  ↳ Job #${job.id} returned to the queue.`)))
-                    .catch(() => {}),
+                    .catch(() => {}))),
                 sleep(4000),
             ]);
         }
@@ -876,9 +940,9 @@ export async function runWorker(opts) {
                 await handleTitleRequests(settings).catch(error => log(c.red(`✖ Title requests failed: ${error.message}`)));
             }
 
-            const claimed = await mt('POST', '/jobs/claim', { worker: WORKER, limit: 1, ttl: JOB_TTL });
-            const job = claimed.data[0];
-            if (!job) {
+            const claimed = await mt('POST', '/jobs/claim', { worker: WORKER, limit: BATCH_CHAPTERS, ttl: JOB_TTL });
+            const jobs = claimed.data;
+            if (!jobs.length) {
                 if (opts.once) break;
                 if (!idle) log(c.gray('Queue is empty. Checking again every minute…'));
                 idle = true;
@@ -886,7 +950,7 @@ export async function runWorker(opts) {
                 continue;
             }
             idle = false;
-            if (await processJob(job, settings)) done++;
+            done += await processBatch(jobs, settings);
         }
     } finally {
         stopEngine();

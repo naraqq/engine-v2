@@ -8,7 +8,8 @@ function getClient(): GoogleGenAI {
     if (!config.translator.apiKey) {
         throw new Error('GEMINI_API_KEY is not set (add it to .env)');
     }
-    client ??= new GoogleGenAI({ apiKey: config.translator.apiKey });
+    // v1beta: preview models (e.g. gemini-3-flash-preview) aren't served on v1.
+    client ??= new GoogleGenAI({ apiKey: config.translator.apiKey, apiVersion: 'v1beta' });
     return client;
 }
 

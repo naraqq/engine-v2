@@ -53,153 +53,221 @@ async function styleSection(): Promise<string> {
 
 const SYSTEM = `You are a professional manga/webtoon translator from English into Mongolian (Cyrillic script).
 
-INPUT: text blocks from an OCR engine, in reading order, for a whole chapter. Each block has OCR lines plus layout hints:
-bg = background colour behind the text, bgType = flat/gradient/art, ink = text colour, size = block width x height in px, x = horizontal position.
+INPUT: OCR text blocks in reading order, often several consecutive chapters of one series ("=== <chapter> ===" marks where each starts). Use the whole story for context: keep names, tone, running jokes and how characters address each other (чи/та) consistent across chapters.
+Each block is one line: "<id> | <text>". " / " separates the OCR lines of one block. A tag like [art], [gradient #1a2b4c] or [flat #20232a] gives the background when it isn't a plain white bubble.
 
-1. CLASSIFY each block ("kind"):
-   - speech: dialogue bubble   - thought: inner monologue   - narration: caption box / narration
-   - system: game-style system/status/notification window (often gradient/blue/dark backgrounds, brackets like [QUEST])
-   - skip: sound effects / onomatopoeia (e.g. BOOM, HUFF, ARGHHH as SFX lettering), signs, labels, logos, watermarks, scanlator/publisher credits and their URLs, staff roles (Translator, Editor, Proofreader), page numbers, OCR garbage.
-   NOT skip (treat as narration): character introduction cards (name, age, job), translator notes like *Note: ..., "To be continued...", time/place captions.
-   When unsure between dialogue and skip, prefer dialogue if it reads as words someone says.
+For every block decide:
+- skip: sound effects / onomatopoeia lettering (BOOM, HUFF, ARGHHH), signs, labels, logos, watermarks, scanlator/publisher credits and their URLs, staff roles, page numbers, OCR garbage.
+  NOT skip: character introduction cards (name, age, job), translator notes (TL note: ...), "To be continued...", time/place captions (narration).
+  When unsure between dialogue and skip, prefer dialogue if it reads as words someone says.
+- otherwise kind = speech (bubble), thought (inner monologue), narration (caption box), or system (game-style status/notification window, often a dark/blue/gradient box or [BRACKETS]), and translate it:
+  - The OCR merges words ("BECAUSEI" = "BECAUSE I") and misreads letters (0/O, 1/I/l, rn/m); read past those errors.
+  - Natural, colloquial Mongolian, true to each character's voice; not word-for-word. Correct spelling, including Ө ө and Ү ү. Do not add meaning that is not in the source.
+  - Translate every English word; only product/model names, codes and stat abbreviations (ARK-2020, HP, STR) may stay Latin.
+  - The GLOSSARY is mandatory. Transliterate new names consistently and list them in new_terms.
+  - system: one Mongolian line per OCR line, joined with "\\n"; keep brackets, numbers, colons and stat layout.
+  - character cards and lists ("NAME (27)" / "JOB: ..."): one line per logical line, joined with "\\n".
+  - everything else: one plain string (it is re-wrapped to fit).
 
-2. FIX OCR ERRORS ("source") — always return the corrected text, never copy OCR mistakes:
-   - The OCR very often MERGES neighbouring words: "BECAUSEI" → "BECAUSE I", "THROWIT" → "THROW IT", "WILLINGTO" → "WILLING TO", "WASI" → "WAS I".
-   - It misreads letters (0/O, 1/I/l, rn/m), drops letters at line ends ("AUTOMATICALL" → "AUTOMATICALLY"), and may split one bubble into two blocks.
-   - Use the chapter context to restore the intended English. Keep one entry per visual line. For skip blocks return source = [].
-
-3. TRANSLATE ("mn"), unless kind is skip (then mn = []):
-   - Natural, colloquial Mongolian, true to each character's voice; not word-for-word. Correct spelling, including Ө ө and Ү ү.
-   - Translate every English word; only product/model names, codes and stat abbreviations (ARK-2020, H-SOFT, HP, STR) may stay Latin.
-   - Do not add meaning that is not in the source.
-   - The GLOSSARY is mandatory. Transliterate new names consistently and report them in new_terms.
-   - system: exactly one mn line per source line; keep brackets, numbers, colons and stat layout.
-   - everything else: a single string in mn (it is re-wrapped to fit) — except character cards and lists (e.g. "NAME (27)" / "JOB: ..."), which keep one mn entry per logical line.
-
-Return one entry for every id.`;
+Answer with every id exactly once: in "skip", or in "lines" with its kind and Mongolian text. Nothing else.`;
 
 const SCHEMA = {
     type: 'object',
     properties: {
-        blocks: {
+        skip: { type: 'array', items: { type: 'string' } },
+        lines: {
             type: 'array',
             items: {
                 type: 'object',
                 properties: {
                     id: { type: 'string' },
-                    kind: { type: 'string', enum: ['speech', 'thought', 'narration', 'system', 'skip'] },
-                    source: { type: 'array', items: { type: 'string' } },
-                    mn: { type: 'array', items: { type: 'string' } },
+                    kind: { type: 'string', enum: ['speech', 'thought', 'narration', 'system'] },
+                    mn: { type: 'string' },
                 },
-                required: ['id', 'kind', 'source', 'mn'],
+                required: ['id', 'kind', 'mn'],
             },
         },
         new_terms: {
             type: 'array',
             items: {
                 type: 'object',
-                properties: { en: { type: 'string' }, mn: { type: 'string' }, note: { type: 'string' } },
+                properties: { en: { type: 'string' }, mn: { type: 'string' } },
                 required: ['en', 'mn'],
             },
         },
     },
-    required: ['blocks', 'new_terms'],
+    required: ['skip', 'lines', 'new_terms'],
 };
 
-interface BlockResult {
-    id: string;
-    kind: Exclude<RegionType, 'unknown'>;
-    source: string[];
-    mn: string[];
+interface TranslateResult {
+    skip: string[];
+    lines: { id: string; kind: Exclude<RegionType, 'unknown' | 'skip'>; mn: string }[];
+    new_terms: GlossaryTerm[];
 }
 
-/** Regions are sent in chunks so very long chapters don't hit output limits. */
-const CHUNK_SIZE = 80;
-
-/** Compact description of a block for the model (OCR text + measured layout hints). */
-function describe(r: Region, pageWidth: number) {
-    const cx = (r.box.x + r.box.w / 2) / pageWidth;
-    return {
-        id: r.id,
-        ocr: r.lines,
-        bg: r.style.backgroundColor ?? 'mixed',
-        bgType: r.style.background,
-        ink: r.style.textColor,
-        size: `${r.box.w}x${r.box.h}`,
-        x: cx < 0.35 ? 'left' : cx > 0.65 ? 'right' : 'center',
-    };
+/** A block to translate and the chapter it belongs to (blocks of several chapters go out together). */
+export interface Item {
+    region: Region;
+    chapter: string;
 }
+
+/**
+ * Text per request (characters of OCR text). Several chapters fit in one request, so the model
+ * sees the story across chapters and the instructions/glossary are paid for once per batch.
+ */
+const BATCH_CHARS = Math.max(2000, Number(process.env.TRANSLATE_BATCH_CHARS) || 14000);
+const BATCH_BLOCKS = 450;
+
+/** Background tag for anything that isn't a plain light bubble (helps spot system windows and SFX on art). */
+function backgroundTag(r: Region): string {
+    const { background, backgroundColor } = r.style;
+    const light = backgroundColor ? luminance(backgroundColor) > 0.75 : false;
+    if (background === 'flat' && light) {
+        return '';
+    }
+    return background === 'art' || !backgroundColor ? ` [${background}]` : ` [${background} ${backgroundColor}]`;
+}
+
+function luminance(hex: string): number {
+    const n = parseInt(hex.replace('#', '').slice(0, 6), 16);
+    if (!Number.isFinite(n)) {
+        return 1;
+    }
+    return (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
+}
+
+const blockText = (r: Region) => r.lines.join(' / ');
 
 const needsWork = (r: Region) =>
     r.type === 'unknown' || (r.type !== 'skip' && (!r.translation?.length || (r.type === 'system' && r.translation.length !== r.lines.length)));
 
+/** Splits items into requests of about BATCH_CHARS of text, in reading order. */
+function batches(items: Item[]): Item[][] {
+    const out: Item[][] = [];
+    let current: Item[] = [];
+    let chars = 0;
+    for (const item of items) {
+        const size = blockText(item.region).length + 12;
+        if (current.length && (chars + size > BATCH_CHARS || current.length >= BATCH_BLOCKS)) {
+            out.push(current);
+            current = [];
+            chars = 0;
+        }
+        current.push(item);
+        chars += size;
+    }
+    if (current.length) {
+        out.push(current);
+    }
+    return out;
+}
+
 /**
- * Classifies, corrects and translates all given regions (whole chapter, reading order).
- * Sets region.type, region.lines (corrected source) and region.translation.
+ * Classifies and translates the given blocks (one or more chapters of a series, in reading order).
+ * Sets region.type and region.translation. Returns the number of requests made.
  */
-export async function translateRegions(
-    regions: Region[],
-    pageWidths: Map<string, number>,
-    glossary: Glossary,
-    model = config.translator.translateModel,
-): Promise<void> {
-    await translatePass(regions, pageWidths, glossary, model);
+export async function translateRegions(items: Item[], glossary: Glossary, model = config.translator.translateModel): Promise<number> {
+    let requests = await translatePass(items, glossary, model);
 
     // Retry once for anything missing or a system window whose line count came back wrong.
-    const bad = regions.filter(needsWork);
+    const bad = items.filter(i => needsWork(i.region));
     if (bad.length) {
-        await translatePass(bad, pageWidths, glossary, model);
-        for (const r of bad) {
+        requests += await translatePass(bad, glossary, model);
+        for (const { region: r } of bad) {
             if (r.type === 'system' && r.translation && r.translation.length !== r.lines.length) {
                 const t = r.translation;
                 r.translation = r.lines.map((_, i) => (i < r.lines.length - 1 ? t[i] ?? '' : t.slice(i).join(' ')));
             }
         }
     }
+    return requests;
 }
 
-async function translatePass(regions: Region[], pageWidths: Map<string, number>, glossary: Glossary, model: string): Promise<void> {
+async function translatePass(items: Item[], glossary: Glossary, model: string): Promise<number> {
     const system = SYSTEM + (await styleSection());
-    for (let i = 0; i < regions.length; i += CHUNK_SIZE) {
-        const chunk = regions.slice(i, i + CHUNK_SIZE);
-        const context = regions
-            .slice(Math.max(0, i - 30), i)
-            .filter(r => r.type !== 'skip')
-            .map(r => `${r.lines.join(' ')} → ${(r.translation ?? []).join(' ')}`);
+    const groups = batches(items);
+    const recent: string[] = []; // last translated lines, carried into the next request
+    for (const group of groups) {
+        const ids = new Map<string, Region>();
+        const body: string[] = [];
+        let chapter = '';
+        for (const [n, item] of group.entries()) {
+            if (item.chapter !== chapter) {
+                chapter = item.chapter;
+                body.push(`=== ${chapter} ===`);
+            }
+            const id = String(n + 1);
+            ids.set(id, item.region);
+            body.push(`${id}${backgroundTag(item.region)} | ${blockText(item.region)}`);
+        }
+        const user = [
+            glossary.terms.length ? `GLOSSARY (mandatory):\n${glossary.terms.map(t => `${t.en} = ${t.mn}${t.note ? ` (${t.note})` : ''}`).join('\n')}` : '',
+            recent.length ? `STORY SO FAR (already translated, context only):\n${recent.join('\n')}` : '',
+            `BLOCKS:\n${body.join('\n')}`,
+        ].filter(Boolean).join('\n\n');
 
-        const payload = {
-            glossary: glossary.terms,
-            previous_context: context,
-            blocks: chunk.map(r => describe(r, pageWidths.get(r.id.split('#')[0]) ?? 720)),
-        };
+        const res = await generateJson<TranslateResult>({ model, system, schema: SCHEMA, user, maxOutputTokens: 32768 });
 
-        const res = await generateJson<{ blocks: BlockResult[]; new_terms: GlossaryTerm[] }>({
-            model,
-            system,
-            schema: SCHEMA,
-            user: JSON.stringify(payload),
-            maxOutputTokens: 32768,
-        });
-
-        const byId = new Map(res.blocks.map(b => [b.id, b]));
-        for (const r of chunk) {
-            const b = byId.get(r.id);
-            if (!b) {
+        for (const id of res.skip ?? []) {
+            const r = ids.get(String(id).trim());
+            if (r) {
+                r.type = 'skip';
+                r.translation = [];
+            }
+        }
+        for (const line of res.lines ?? []) {
+            const r = ids.get(String(line.id).trim());
+            if (!r || !line.mn?.trim()) {
                 continue;
             }
-            r.type = b.kind;
-            if (b.source?.length) {
-                r.lines = b.source;
-            }
-            r.translation = b.kind === 'skip' ? [] : b.mn;
+            r.type = line.kind;
+            const parts = line.mn.split('\n').map(t => t.trim()).filter(Boolean);
+            // System windows keep one line per OCR line; a card/list keeps the lines the model split it
+            // into; everything else is one string that the renderer re-wraps.
+            r.translation = r.type === 'system' || (parts.length > 1 && parts.length <= r.lines.length) ? parts : [parts.join(' ')];
         }
 
         for (const term of res.new_terms ?? []) {
-            if (!glossary.terms.some(t => t.en.toLowerCase() === term.en.toLowerCase())) {
-                glossary.terms.push(term);
+            if (term.en?.trim() && term.mn?.trim() && !glossary.terms.some(t => t.en.toLowerCase() === term.en.toLowerCase())) {
+                glossary.terms.push({ en: term.en.trim(), mn: term.mn.trim() });
             }
         }
+
+        const translated = group.filter(i => i.region.type !== 'skip' && i.region.translation?.length);
+        recent.push(...translated.slice(-15).map(i => `${blockText(i.region)} → ${i.region.translation!.join(' ')}`));
+        recent.splice(0, Math.max(0, recent.length - 15));
     }
+    return groups.length;
+}
+
+/**
+ * Obvious non-dialogue the model doesn't need to see: scanlator credits and URLs, printer colour
+ * bars (cyan/magenta), letter soup, and short low-confidence readings without any punctuation.
+ * Measured on 6,173 blocks the model had classified: catches ~2/3 of its "skip" answers and
+ * <0.2% of real lines (mostly grunts like "HMM", which then simply stay in English).
+ */
+export function isLocalJunk(r: Region): boolean {
+    const text = r.lines.join(' ');
+    const letters = text.replace(/[^\p{L}\p{N}]/gu, '');
+    if (letters.length < 3) {
+        return true;
+    }
+    if (/https?:\/\/|www\.|\.(com|net|org|gg|io|xyz)\b|scans\b|discord|patreon|ko-?fi|\b(translator|proofreader|typesetter|cleaner|redrawer|editor|raws?)\s*:/i.test(text)) {
+        return true;
+    }
+    if (/c?yan\s*m|magenta|ma\s*gen/i.test(text)) {
+        return true;
+    }
+    if (/[?!.…,~\-—]/.test(text)) {
+        return false; // punctuation: reads like someone talking
+    }
+    const words = text.split(/\s+/).filter(Boolean);
+    const tiny = words.filter(w => w.replace(/[^\p{L}\p{N}]/gu, '').length <= 2).length;
+    const conf = r.ocr.length ? r.ocr.reduce((a, o) => a + o.confidence, 0) / r.ocr.length : 1;
+    return conf < 0.6
+        || (words.length >= 2 && tiny / words.length >= 0.75)
+        || (words.length === 1 && text.replace(/[^\p{L}]/gu, '').length <= 4 && conf < 0.85)
+        || (r.style.background === 'art' && words.length <= 2 && conf < 0.8);
 }
 
 const POLISH_SYSTEM = `You are a native Mongolian editor for webtoon scanlations. You receive a chapter's draft Mongolian lines (machine translated) with the English original for meaning only.
@@ -235,6 +303,7 @@ const POLISH_SCHEMA = {
  */
 export async function polishRegions(regions: Region[], model = config.translator.translateModel): Promise<number> {
     const todo = regions.filter(r => r.type !== 'skip' && r.type !== 'unknown' && r.translation?.some(t => t.trim()));
+    const CHUNK_SIZE = 120;
     const system = POLISH_SYSTEM + (await styleSection());
     let changed = 0;
     for (let i = 0; i < todo.length; i += CHUNK_SIZE) {
@@ -243,12 +312,12 @@ export async function polishRegions(regions: Region[], model = config.translator
             model,
             system,
             schema: POLISH_SCHEMA,
-            user: JSON.stringify({ blocks: chunk.map(r => ({ id: r.id, kind: r.type, en: r.lines.join(' '), draft: r.translation })) }),
+            user: JSON.stringify({ blocks: chunk.map((r, n) => ({ id: String(n + 1), kind: r.type, en: r.lines.join(' '), draft: r.translation })) }),
             maxOutputTokens: 32768,
         });
-        const byId = new Map(res.blocks.map(b => [b.id, b.mn]));
-        for (const r of chunk) {
-            const mn = byId.get(r.id)?.filter(t => t.trim());
+        const byId = new Map(res.blocks.map(b => [String(b.id), b.mn]));
+        for (const [n, r] of chunk.entries()) {
+            const mn = byId.get(String(n + 1))?.filter(t => t.trim());
             if (!mn?.length || (r.type === 'system' && mn.length !== r.translation!.length)) {
                 continue;
             }

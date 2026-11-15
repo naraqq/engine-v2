@@ -50,14 +50,14 @@ export const config = {
     translator: {
         apiKey: process.env.GEMINI_API_KEY,
         /** Translation model: a Gemini model name, or a claude-* model (needs ANTHROPIC_API_KEY). */
-        translateModel: process.env.TRANSLATE_MODEL || process.env.GEMINI_TRANSLATE_MODEL || 'gemini-3.5-flash',
+        translateModel: process.env.TRANSLATE_MODEL || process.env.GEMINI_TRANSLATE_MODEL || 'gemini-3-flash-preview',
         anthropicApiKey: process.env.ANTHROPIC_API_KEY,
         /** Claude thinking depth: low | medium | high. */
         claudeEffort: process.env.CLAUDE_EFFORT || 'low',
         /** Mongolian voice: rules + example pairs used by translation and polish (edit this file to tune the style). */
         styleFile: process.env.TRANSLATOR_STYLE || path.join(__dirname, '../../assets/translation/style.json'),
-        /** Run the native-editor polish pass after translating (set TRANSLATOR_POLISH=false to skip). */
-        polish: process.env.TRANSLATOR_POLISH !== 'false',
+        /** Second "native editor" pass over every line. Off by default: it doubles the output tokens (TRANSLATOR_POLISH=true to turn on). */
+        polish: process.env.TRANSLATOR_POLISH === 'true',
         /** Gemini thinking tokens per call; never more than 256 (cost cap), whatever .env says. */
         thinkingBudget: Math.min(Math.max(parseInt(process.env.GEMINI_THINKING_BUDGET || '256', 10) || 0, 0), 256),
         /** Local OCR runs on the GPU via DirectML ("dml"); "cpu" works everywhere but ~2.5x slower. */
