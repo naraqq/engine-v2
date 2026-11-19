@@ -20,13 +20,14 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { ROOT, api, c, chapterNumber, childPids, ensureServer, follow, killChildren, killTree, normalize, say, sleep, status, track } from './cli.mjs';
+import { ROOT, api, c, chapterNumber, childPids, describeNumbers, ensureServer, fail, follow, killChildren, killTree, normalize, say, sleep, status, track } from './cli.mjs';
 import { fetchMontoonTitles, findOnSource, montoonConfig, resultUrl, syncMontoon } from './montoon.mjs';
 import { LostJobError, flushEvents, log, logEvent, mt } from './montoon-api.mjs';
 import { DIRS, removeLocalChapter, translatedPages, uploadChapter } from './upload.mjs';
 import { stitchChapter } from './stitch.mjs';
 import { ensureTitleOnMontoon } from './title-maker.mjs';
 import { findByOtherNames } from './aliases.mjs';
+import { resolveGenre, sourceHasGenre, titleHasGenre } from './genres.mjs';
 
 const WORKER = (process.env.WORKER_NAME || os.hostname()).replace(/[^\w.-]+/g, '-').slice(0, 56);
 const JOB_TTL = 900; // seconds a claimed job stays ours without a heartbeat
@@ -44,32 +45,39 @@ const firstChapterCount = settings => Math.max(settings.first_chapters || 0, set
 
 // ---------------------------------------------------------------- planner
 
-async function maybePlan(settings, opts) {
-    const lease = (await mt('POST', '/lease', { name: 'planner', worker: WORKER, ttl: 3600 })).data;
-    if (!lease.acquired) return;
+/**
+ * Plans when this worker gets the planner lock and a plan is due. With a
+ * genre (--genre drama) it plans that genre only, under its own lock, so
+ * genre workers and normal workers each keep their own schedule.
+ * Returns true when it planned.
+ */
+async function maybePlan(settings, opts, genre = null) {
+    const name = genre ? `planner:${genre.slug}` : 'planner';
+    const lease = (await mt('POST', '/lease', { name, worker: WORKER, ttl: 3600 })).data;
+    if (!lease.acquired) return false;
     const lastRun = lease.value?.last_run ? Date.parse(lease.value.last_run) : 0;
     const due = Date.now() - lastRun >= settings.plan_every_minutes * 60_000;
     if (!due && !opts.planNow) {
-        await mt('POST', '/lease/release', { name: 'planner', worker: WORKER });
-        return;
+        await mt('POST', '/lease/release', { name, worker: WORKER });
+        return false;
     }
     opts.planNow = false;
 
     say('');
-    log(c.bold(c.cyan(`▶ Planning (this worker holds the planner lock; next plan in ${settings.plan_every_minutes} min)`)));
-    const summary = {};
+    log(c.bold(c.cyan(`▶ Planning${genre ? ` ${genre.slug} only` : ''} (this worker holds the ${name} lock; next plan in ${settings.plan_every_minutes} min)`)));
+    const summary = genre ? { genre: genre.slug } : {};
     try {
-        summary.episodes = await planEpisodes();
+        summary.episodes = await planEpisodes(genre);
     } catch (error) {
         log(c.red(`✖ Episode check failed: ${error.message}`));
     }
     try {
-        summary.new_titles = await planNewTitles(settings);
+        summary.new_titles = await planNewTitles(settings, genre);
     } catch (error) {
         log(c.red(`✖ New-title search failed: ${error.message}`));
     }
     await mt('POST', '/lease/release', {
-        name: 'planner',
+        name,
         worker: WORKER,
         value: { last_run: new Date().toISOString(), by: WORKER, summary },
     });
@@ -84,9 +92,10 @@ async function maybePlan(settings, opts) {
         parts.push('episode check failed');
     }
     if (nt) parts.push(nt.picked ? `${count(nt.picked, 'new title')} picked` : 'no new titles picked');
-    logEvent('plan', `Plan: ${parts.join('; ')}`, { level: ep ? 'info' : 'error', data: summary });
+    logEvent('plan', `Plan${genre ? ` (${genre.slug} only)` : ''}: ${parts.join('; ')}`, { level: ep ? 'info' : 'error', data: summary });
     log(c.bold(c.cyan('▶ Planning done. Back to downloading.')));
     say('');
+    return true;
 }
 
 async function queueJobs(jobs) {
@@ -161,12 +170,13 @@ function episodePriority(title, titles, position) {
 }
 
 /** New episodes of Montoon's own titles: the --montoon check, queued. */
-async function planEpisodes() {
-    log(c.cyan('▶ Checking Montoon titles for new episodes'));
+async function planEpisodes(genre = null) {
+    log(c.cyan(`▶ Checking Montoon ${genre ? `${genre.slug} ` : ''}titles for new episodes`));
     const checked = [];
     const totals = await syncMontoon({
         from: EPISODE_SITES,
         format: 'images',
+        filter: genre ? { test: t => titleHasGenre(t, genre.slug), label: `in ${genre.slug}` } : undefined,
         onChecked: ({ title, site, chapters }) => checked.push({
             content_id: title.id,
             keep: chapters.map(chapter => `${site.id}:${chapter.id}`),
@@ -199,8 +209,10 @@ async function planEpisodes() {
  * jobs: if those were removed (e.g. "Clear queue"), queue them again.
  * Queuing is idempotent by key, so existing jobs are left alone.
  */
-async function requeueOrphanedPicks(registry, settings) {
-    const waiting = registry.data.filter(t => t.decision === 'picked' && !t.content_id).slice(0, 30);
+async function requeueOrphanedPicks(registry, settings, genre = null) {
+    const waiting = registry.data
+        .filter(t => t.decision === 'picked' && !t.content_id && (!genre || t.meta?.genre === genre.slug))
+        .slice(0, 30);
     let created = 0;
     for (const t of waiting) {
         try {
@@ -360,11 +372,11 @@ async function handleTitleRequests(settings) {
     }
 }
 
-async function planNewTitles(settings) {
+async function planNewTitles(settings, genre = null) {
     const registry = await mt('GET', '/titles?limit=2000');
-    const requeued = await requeueOrphanedPicks(registry, settings);
+    const requeued = await requeueOrphanedPicks(registry, settings, genre);
     const quota = settings.new_titles_per_day - registry.picked_today;
-    log(c.cyan(`▶ Looking for new titles (${registry.picked_today}/${settings.new_titles_per_day} picked today)`));
+    log(c.cyan(`▶ Looking for new ${genre ? `${genre.slug} ` : ''}titles (${registry.picked_today}/${settings.new_titles_per_day} picked today)`));
     if (quota <= 0) {
         log(c.gray('  Today\'s limit is reached. Skipping.'));
         return { picked: 0, requeued };
@@ -412,9 +424,21 @@ async function planNewTitles(settings) {
     log(c.gray(`  ↳ Reader requests: ${requests.length} asked for, ${matchedRequests} found on Asura Scans or Manga18fx.`));
 
     // Chapter counts for the strongest candidates (each is a page load).
-    const pool = [...candidates.values()]
-        .sort((a, b) => formulaScore(b) - formulaScore(a))
-        .slice(0, 15);
+    let pool = [...candidates.values()].sort((a, b) => formulaScore(b) - formulaScore(a));
+    if (genre) {
+        // Only the genre: each candidate's own genre tags, from its page.
+        const inGenre = [];
+        for (const entry of pool.slice(0, 40)) {
+            if (inGenre.length >= 15) break;
+            status(c.gray(`  ↳ Reading the genres of "${entry.title}"…`));
+            const info = await api('GET', `/api/v1/sources/${entry.site.id}/info?url=${encodeURIComponent(entry.url)}`).catch(() => null);
+            entry.genres = info?.genres || [];
+            if (sourceHasGenre(entry.genres, genre.slug)) inGenre.push(entry);
+        }
+        log(c.gray(`  ↳ ${count(inGenre.length, `${genre.slug} title`)} among the ${Math.min(pool.length, 40)} strongest candidates.`));
+        pool = inGenre;
+    }
+    pool = pool.slice(0, 15);
     const usable = [];
     for (const entry of pool) {
         status(c.gray(`  ↳ Checking chapters of "${entry.title}"…`));
@@ -450,6 +474,8 @@ async function planNewTitles(settings) {
                 chapters: r.entry.chapterCount,
                 newest: r.entry.newest,
                 ranked_by: r.by,
+                // Picked by a genre worker: its jobs are that worker's to take.
+                ...(genre ? { genre: genre.slug, source_genres: r.entry.genres } : {}),
             },
         })),
     })).data;
@@ -905,9 +931,27 @@ export async function setWorkerEnabled(enabled) {
     say(enabled ? c.green('Workers resumed.') : c.yellow('Workers paused. They finish their current job, then wait.'));
 }
 
+/**
+ * The titles a genre worker takes jobs for: Montoon titles in the genre, and
+ * new titles a genre worker picked for it (not on Montoon yet, or created
+ * with other genres by the metadata step).
+ */
+async function genreScope(genre) {
+    const titles = await fetchMontoonTitles(montoonConfig());
+    if (titles.length && !('genres' in titles[0])) {
+        fail('The Montoon backend does not send title genres yet. Deploy it, then run this again.');
+    }
+    const picked = (await mt('GET', '/titles?decision=picked&limit=2000')).data;
+    return {
+        content_ids: titles.filter(t => titleHasGenre(t, genre.slug)).map(t => t.id),
+        worker_title_ids: picked.filter(t => t.meta?.genre === genre.slug).map(t => t.id),
+    };
+}
+
 export async function runWorker(opts) {
     montoonConfig(); // fails early without a token
-    say(c.bold(c.cyan(`▶ Montoon worker "${WORKER}"`)) + c.gray(` · files in ${DIRS.downloads}`));
+    const genre = opts.genre ? await resolveGenre(opts.genre) : null;
+    say(c.bold(c.cyan(`▶ Montoon worker "${WORKER}"`)) + (genre ? c.bold(c.magenta(` · ${genre.slug} only (${genre.name})`)) : '') + c.gray(` · files in ${DIRS.downloads}`));
     say(c.gray('  Ctrl+C stops it now (the current job goes back to the queue). From another terminal: download --stop'));
 
     installStopHandler();
@@ -917,10 +961,11 @@ export async function runWorker(opts) {
     const stopEngine = await ensureServer();
     writePidFile();
     let idle = false, paused = false, done = 0, lastRequestCheck = 0;
-    logEvent('worker', `${WORKER} started${opts.noPlan ? ' (jobs only, no planning)' : ''}`);
+    let scope = null, scopeAt = 0;
+    logEvent('worker', `${WORKER} started${genre ? ` (${genre.slug} only)` : ''}${opts.noPlan ? ' (jobs only, no planning)' : ''}`);
     try {
         for (;;) {
-            const settings = (await mt('POST', '/heartbeat', { worker: WORKER, info: { platform: process.platform, done } })).data.settings;
+            const settings = (await mt('POST', '/heartbeat', { worker: WORKER, info: { platform: process.platform, done, genre: genre?.slug ?? null } })).data.settings;
             if (!settings.enabled) {
                 if (!paused) log(c.yellow('⏸ Paused from the server. Waiting…'));
                 paused = true;
@@ -930,8 +975,15 @@ export async function runWorker(opts) {
             if (paused) log(c.green('▶ Resumed.'));
             paused = false;
 
+            let planned = false;
             if (!opts.noPlan) {
-                await maybePlan(settings, opts).catch(error => log(c.red(`✖ Planning failed: ${error.message}`)));
+                planned = await maybePlan(settings, opts, genre).catch(error => (log(c.red(`✖ Planning failed: ${error.message}`)), false));
+            }
+            // Which titles' jobs to take; refreshed after a plan and every 10 minutes.
+            if (genre && (planned || !scope || Date.now() - scopeAt >= 600_000)) {
+                scope = await genreScope(genre);
+                scopeAt = Date.now();
+                if (planned || !idle) log(c.gray(`  ↳ Taking jobs of ${count(scope.content_ids.length, `Montoon ${genre.slug} title`)} and ${count(scope.worker_title_ids.length, 'new pick')}.`));
             }
 
             // Admin "Translate a title" requests: checked every 2 minutes, between jobs.
@@ -940,11 +992,16 @@ export async function runWorker(opts) {
                 await handleTitleRequests(settings).catch(error => log(c.red(`✖ Title requests failed: ${error.message}`)));
             }
 
-            const claimed = await mt('POST', '/jobs/claim', { worker: WORKER, limit: BATCH_CHAPTERS, ttl: JOB_TTL });
+            const claimed = await mt('POST', '/jobs/claim', { worker: WORKER, limit: BATCH_CHAPTERS, ttl: JOB_TTL, ...(scope || {}) });
             const jobs = claimed.data;
+            if (scope && jobs.some(j => !scope.content_ids.includes(j.content_id) && !scope.worker_title_ids.includes(j.worker_title_id))) {
+                // An older server ignores the filter and hands out anything: give it all back.
+                await Promise.all(jobs.map(job => mt('POST', `/jobs/${job.id}/fail`, { worker: WORKER, error: `Handed back: this server cannot claim ${genre.slug} jobs only.` }).catch(() => {})));
+                fail(`The Montoon backend cannot claim ${genre.slug} jobs only yet. Deploy it, then run this again.`);
+            }
             if (!jobs.length) {
                 if (opts.once) break;
-                if (!idle) log(c.gray('Queue is empty. Checking again every minute…'));
+                if (!idle) log(c.gray(`${genre ? `No ${genre.slug} jobs queued` : 'Queue is empty'}. Checking again every minute…`));
                 idle = true;
                 await sleep(60_000);
                 continue;
@@ -958,4 +1015,161 @@ export async function runWorker(opts) {
         await flushEvents().catch(() => {});
     }
     log(c.bold(`Stopped. ${count(done, 'chapter')} done this session.`));
+}
+
+// ------------------------------------------------------ one title, all of it
+
+/** Priority of download --translate jobs: above admin requests (200) and everything the planner queues. */
+const TRANSLATE_PRIORITY = 300;
+
+/**
+ * The Montoon title a query names: its ID, or exactly its English or
+ * Mongolian name. null when there is none; fails when several share the name.
+ */
+function montoonTitleFor(query, titles) {
+    if (/^\d+$/.test(query)) {
+        return titles.find(t => String(t.id) === query) || fail(`There is no Montoon title #${query}.`);
+    }
+    if (/^https?:\/\//i.test(query)) return null;
+    const wanted = normalize(query);
+    const exact = titles.filter(t => normalize(t.title) === wanted || normalize(t.title_mn) === wanted);
+    if (exact.length > 1) {
+        fail(`Several Montoon titles are called "${query}": ${exact.map(t => `#${t.id} ${t.title || t.title_mn}`).join(' · ')}. Pass the ID instead.`);
+    }
+    return exact[0] || null;
+}
+
+/**
+ * Where one title's chapters come from and which of them to translate:
+ * everything after Montoon's last episode for a title Montoon has (found the
+ * same way as the episode check, saved links included), or every chapter of
+ * a new one.
+ */
+async function titleToTranslate(query) {
+    const titles = await fetchMontoonTitles(montoonConfig(), '?renewed=all');
+    let existing = montoonTitleFor(query, titles);
+
+    if (existing && existing.latest_episode !== null) {
+        if (!existing.translation_renewed) {
+            fail(`"${existing.title || existing.title_mn}" (#${existing.id}) is an old translation; new episodes aren't added to those.`);
+        }
+        let found = null;
+        await syncMontoon({
+            onlyId: existing.id,
+            from: EPISODE_SITES,
+            format: 'images',
+            dryRun: true,
+            onChecked: checked => { found = checked; },
+        }, DIRS.downloads);
+        if (!found) fail(`Couldn't read "${existing.title || existing.title_mn}" on ${EPISODE_SITES}. Link it with: download --montoon --link ${existing.id} <series url>`);
+        return { site: found.site, url: found.url, title: existing.title || existing.title_mn, chapters: found.chapters, contentId: existing.id, workerTitleId: null };
+    }
+
+    say(c.cyan(`▶ Looking for "${query}" on ${EPISODE_SITES.replace(/,/g, ', ')}…`));
+    const found = await resolveTitleRequest(query);
+    if (!found.site) {
+        fail(found.reason || `No exact title match for "${query}".`
+            + (found.candidates?.length ? ` Closest: ${found.candidates.slice(0, 6).join(' · ')}.` : '')
+            + ' Pass the series link instead.');
+    }
+    say(c.green(`  ✓ "${found.title}" on ${found.site.title}: ${count(found.chapters.length, 'chapter')}`) + c.gray(` → ${found.url}`));
+    existing ||= titles.find(t => normalize(t.title) === normalize(found.title) || normalize(t.title_mn) === normalize(found.title));
+    if (existing) {
+        const have = existing.latest_episode;
+        say(c.gray(`  ↳ Already on Montoon as #${existing.id} (${have === null ? 'no episodes yet' : `up to episode ${have}`}).`));
+        return {
+            site: found.site, url: found.url, title: existing.title || found.title,
+            chapters: have === null ? found.chapters : found.chapters.filter(ch => ch.number > have),
+            contentId: existing.id, workerTitleId: null,
+        };
+    }
+    say(c.gray('  ↳ Not on Montoon yet: added as a new title with its first translated chapter.'));
+    return { site: found.site, url: found.url, title: found.title, chapters: found.chapters, contentId: null, workerTitleId: null, isNew: true };
+}
+
+/**
+ * download --translate "<title, Montoon ID or series link>"
+ *
+ * Translates one title up to its newest chapter and nothing else: no
+ * planning, no other titles. Its chapters go into the shared queue as normal
+ * jobs (so the admin page shows them and uploads are scheduled as usual),
+ * and this worker claims only those. Other workers may help with them.
+ */
+export async function translateTitle(opts) {
+    const query = String(opts.translate || '').trim();
+    if (!query) fail('Usage: download --translate "<title, Montoon ID or series link>"');
+    montoonConfig();
+
+    installStopHandler();
+    writePidFile();
+    process.once('exit', removePidFile);
+    const stopEngine = await ensureServer();
+    writePidFile();
+    let done = 0;
+    try {
+        const { settings } = (await mt('POST', '/heartbeat', { worker: WORKER, info: { platform: process.platform, done } })).data;
+        const target = await titleToTranslate(query);
+
+        let chapters = target.chapters;
+        if (opts.range) {
+            const [from, to] = opts.range;
+            chapters = chapters.filter(ch => ch.number >= Math.min(from, to) && ch.number <= Math.max(from, to));
+        }
+        say('');
+        if (!chapters.length) {
+            say(opts.range
+                ? c.yellow(`■ None of the ${count(target.chapters.length, 'chapter')} still to translate (${describeNumbers(target.chapters.map(ch => ch.number))}) is in that range.`)
+                : c.green(`✓ "${target.title}" has nothing to translate: Montoon is up to date.`));
+            return;
+        }
+        say(c.bold(c.cyan(`▶ ${target.title}: ${count(chapters.length, 'chapter')} to translate (${describeNumbers(chapters.map(ch => ch.number))}) from ${target.site.title}`)));
+        if (opts.dryRun) {
+            say(c.gray('  Dry run: nothing queued.'));
+            return;
+        }
+
+        if (target.isNew) {
+            // Picked, so the worker creates it on Montoon with its first upload.
+            target.workerTitleId = (await mt('POST', '/titles', {
+                items: [{
+                    source_id: target.site.id,
+                    series_url: target.url,
+                    title: target.title,
+                    origin: 'admin',
+                    decision: 'picked',
+                    reason: `download --translate on ${WORKER}`,
+                    meta: { chapters: target.chapters.length, newest: target.chapters.at(-1)?.number },
+                }],
+            })).data[0].id;
+        }
+
+        const jobs = chapters.map(chapter => chapterJob({
+            site: target.site, url: target.url, chapter, title: target.title,
+            contentId: target.contentId, workerTitleId: target.workerTitleId,
+            priority: TRANSLATE_PRIORITY, reason: 'translate title',
+        }));
+        const queued = await queueJobs(jobs);
+        say(c.gray(`  ↳ ${queued.created} jobs queued${queued.existing ? `, ${queued.existing} were already in the queue (moved to the front if still waiting)` : ''}.`));
+        logEvent('note', `${WORKER}: translating "${target.title}" (${count(chapters.length, 'chapter')}) with download --translate`, {
+            data: { source_id: target.site.id, url: target.url, content_id: target.contentId },
+        });
+
+        const keys = new Set(jobs.map(j => j.key));
+        for (;;) {
+            const claimed = (await mt('POST', '/jobs/claim', { worker: WORKER, limit: BATCH_CHAPTERS, ttl: JOB_TTL, keys: [...keys] })).data;
+            if (claimed.some(job => !keys.has(job.key))) {
+                // An older server ignores `keys` and hands out anything: give it all back.
+                await Promise.all(claimed.map(job => mt('POST', `/jobs/${job.id}/fail`, { worker: WORKER, error: 'Handed back: this server cannot claim one title\'s jobs.' }).catch(() => {})));
+                fail('The Montoon backend cannot claim one title\'s jobs yet. Deploy it, then run this again (the jobs stay queued for every worker meanwhile).');
+            }
+            if (!claimed.length) break;
+            done += await processBatch(claimed, settings);
+        }
+    } finally {
+        stopEngine();
+        await flushEvents().catch(() => {});
+    }
+    say('');
+    log(c.bold(`Done: ${count(done, 'chapter')} translated and uploaded on this PC.`));
+    say(c.gray('  Chapters that failed, or that another worker is still on, stay in the queue and any worker retries them. See download --work --status.'));
 }

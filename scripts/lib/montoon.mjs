@@ -196,12 +196,18 @@ export async function syncMontoon(opts, outDir) {
     const dropped = titles.filter(t => !t.translation_renewed).length;
     titles = titles.filter(t => t.translation_renewed);
     say(`  ${c.bold(titles.length)} comics with a renewed translation.${dropped ? c.gray(` ${dropped} old translations skipped.`) : ''}`);
-    if (opts.only) {
+    if (opts.onlyId !== undefined) {
+        titles = titles.filter(t => String(t.id) === String(opts.onlyId));
+    } else if (opts.only) {
         const needle = normalize(opts.only);
         titles = titles.filter(t => String(t.id) === opts.only
             || normalize(t.title).includes(needle)
             || normalize(t.title_mn).includes(needle));
         say(`  ${c.bold(titles.length)} match "${opts.only}".`);
+    }
+    if (opts.filter) {
+        titles = titles.filter(opts.filter.test);
+        say(`  ${c.bold(titles.length)} ${opts.filter.label}.`);
     }
     if (!titles.length) return { updated: 0, pending: 0, notFound: 0, failed: 0, notFoundTitles: [], failedTitles: [] };
 
@@ -419,7 +425,7 @@ export async function syncMontoon(opts, outDir) {
                 const fresh = numbered.filter(ch => ch.number > have).sort((a, b) => a.number - b.number);
                 say(c.gray(`  ↳ ${target.site.title} has ${chapters.length} chapters${newest !== null ? `, newest is ${newest}` : ''}.`));
                 // The title was read successfully: tell the caller what it wants now.
-                opts.onChecked?.({ title: t, site: target.site, chapters: fresh });
+                opts.onChecked?.({ title: t, site: target.site, url: target.url, chapters: fresh });
 
                 if (!fresh.length) {
                     say(c.green('  ✓ Up to date.'));
