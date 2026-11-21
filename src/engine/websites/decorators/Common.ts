@@ -196,6 +196,10 @@ export async function FetchMangaCSS<E extends HTMLElement = HTMLElement>(this: M
         }
     });
     const [element] = await FetchCSS<E>(request, query);
+    // A block/rate-limit page or a layout change leaves nothing to read the title from.
+    if (!element) {
+        throw new Error(`No series title on ${uri.href} (looked for "${query}"): the site sent a different page, maybe a block or rate limit, or changed its layout.`);
+    }
     const { id, title } = extract.call(this, element, uri);
     return new Manga(this, provider, id, title);
 }
