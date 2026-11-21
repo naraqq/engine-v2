@@ -725,8 +725,43 @@ async function downloadJob(job) {
     return { series: found.series, chapter: found.chapter };
 }
 
-/** Uploads one translated chapter as an unreleased draft episode and completes its job. */
-async function uploadJob(job, series, chapter, settings) {
+/** The engine's folder name for a series (SanitizeFileName in src/engine/StorageController.ts). */
+function seriesFolder(title) {
+    const lookup = { '<': '＜', '>': '＞', ':': '꞉', '"': '＂', '/': '／', '\\': '＼', '|': '｜', '?': '？', '*': '＊', '~': '～' };
+    return String(title)
+        .replace(/[\u0000-\u001F\u007F-\u009F]/gu, '')
+        .replace(/./g, ch => lookup[ch] ?? ch)
+        .replace(/[\s.]+$/, '')
+        .trim() || 'untitled';
+}
+
+const IMAGE_FILE = /\.(jpe?g|png|webp|avif|gif)$/i;
+
+/**
+ * A chapter this PC already translated in full, kept because its title
+ * wasn't on Montoon yet. When the title is created, the server puts such
+ * jobs back in the queue; they go straight to upload, with no download and
+ * no second (paid) translation. Complete = a translated page for every
+ * downloaded page, so a run cut off mid-render is translated again.
+ */
+function keptChapter(job) {
+    const series = seriesFolder(job.payload.title);
+    const chapter = `chapter-${job.payload.chapter_number}`;
+    const { files } = translatedPages(series, chapter);
+    if (!files.length) return null;
+    const source = path.join(DIRS.downloads, series, chapter);
+    const pages = existsSync(source) ? readdirSync(source).filter(f => IMAGE_FILE.test(f)).length : 0;
+    return pages && files.length >= pages ? { series, chapter } : null;
+}
+
+/**
+ * Uploads one translated chapter as an unreleased draft episode and completes its job.
+ * Returns { contentId, titleError }. If adding a new title to Montoon fails, the
+ * chapter is kept on this PC and the job completed anyway: the failure is the
+ * server's, not the chapter's, so it must not use up the job's tries. The
+ * server requeues kept chapters once the title exists.
+ */
+async function uploadJob(job, series, chapter, settings, { skipTitle = null } = {}) {
     const p = job.payload;
     const { dir: translatedDir, files } = translatedPages(series, chapter);
     if (!files.length) throw new Error('The translator produced no pages.');
@@ -734,13 +769,20 @@ async function uploadJob(job, series, chapter, settings) {
     // A new title is first added to Montoon (house content, with metadata and posters).
     let summary;
     let contentId = job.content_id;
-    if (!contentId && job.worker_title_id && settings?.auto_create_titles !== false) {
-        contentId = await ensureTitleOnMontoon({
-            workerTitleId: job.worker_title_id,
-            sourceId: p.source_id,
-            seriesUrl: p.series_url,
-            title: p.title,
-        });
+    let titleError = skipTitle;
+    if (!contentId && !titleError && job.worker_title_id && settings?.auto_create_titles !== false) {
+        try {
+            contentId = await ensureTitleOnMontoon({
+                workerTitleId: job.worker_title_id,
+                sourceId: p.source_id,
+                seriesUrl: p.series_url,
+                title: p.title,
+            });
+        } catch (error) {
+            if (error instanceof LostJobError) throw error;
+            titleError = error.message;
+            log(c.yellow(`  ⚠ Couldn't add the title to Montoon: ${titleError}`));
+        }
     }
     if (contentId) {
         const uploaded = await uploadChapter({ series, chapter, contentId, episodeNumber: p.chapter_number });
@@ -751,12 +793,12 @@ async function uploadJob(job, series, chapter, settings) {
             summary = { worker: WORKER, title: series, episode_id: uploaded.episodeId, pages: uploaded.pages, bytes: uploaded.bytes };
         }
     } else {
-        log(`  ${c.gray(`↳ New title, not on Montoon yet: kept in ${translatedDir}`)}`);
-        summary = { worker: WORKER, title: series, pages: files.length, local_dir: translatedDir };
+        log(`  ${c.gray(`↳ New title, not on Montoon yet: kept in ${translatedDir}${titleError ? ' (uploads once the title is added)' : ''}`)}`);
+        summary = { worker: WORKER, title: series, pages: files.length, local_dir: translatedDir, ...(titleError ? { title_error: String(titleError).slice(0, 500) } : {}) };
     }
     await mt('POST', `/jobs/${job.id}/complete`, { worker: WORKER, result: summary });
     log(c.green(`  ✔ ${p.title} chapter ${p.chapter_number} done (job #${job.id}).`));
-    return contentId;
+    return { contentId, titleError };
 }
 
 /**
@@ -792,12 +834,19 @@ async function processBatch(jobs, settings = null) {
 
     let done = 0;
     try {
-        // 1. Download every chapter.
+        // 1. Download every chapter (chapters already translated here skip ahead to upload).
         const ready = [];
+        const kept = [];
         for (const job of jobs) {
             const p = job.payload;
             say('');
             log(`${c.bold(c.cyan('⬇'))} ${c.bold(p.title)} chapter ${c.bold(p.chapter_number)} ${c.gray(`from ${p.source_id} · job #${job.id} · ${p.reason} · try ${job.attempts}/${job.max_attempts}`)}`);
+            const already = keptChapter(job);
+            if (already) {
+                log(`  ${c.gray('↳ Already translated on this PC: uploading it as is.')}`);
+                kept.push({ job, ...already });
+                continue;
+            }
             try {
                 ready.push({ job, ...(await downloadJob(job)) });
             } catch (error) {
@@ -807,26 +856,33 @@ async function processBatch(jobs, settings = null) {
 
         // 2. Translate each title's chapters together, in chapter order; 3. upload them.
         const bySeries = new Map();
-        for (const item of ready) bySeries.set(item.series, [...(bySeries.get(item.series) || []), item]);
+        for (const item of [...kept, ...ready]) bySeries.set(item.series, [...(bySeries.get(item.series) || []), item]);
         for (const [series, items] of bySeries) {
             items.sort((a, b) => Number(a.job.payload.chapter_number) - Number(b.job.payload.chapter_number));
-            say('');
-            log(`  ${c.cyan('✎')} Translating ${series}: ${items.map(i => i.chapter).join(', ')}…`);
-            const started = Date.now();
-            try {
-                await translateChapters(series, items.map(i => i.chapter));
-            } catch (error) {
-                for (const { job } of items) await fail(job, error);
-                continue;
+            const fresh = items.filter(i => !kept.includes(i));
+            if (fresh.length) {
+                say('');
+                log(`  ${c.cyan('✎')} Translating ${series}: ${fresh.map(i => i.chapter).join(', ')}…`);
+                const started = Date.now();
+                try {
+                    await translateChapters(series, fresh.map(i => i.chapter));
+                } catch (error) {
+                    for (const { job } of fresh) await fail(job, error);
+                    items.splice(0, items.length, ...items.filter(i => kept.includes(i)));
+                }
+                if (items.some(i => !kept.includes(i))) {
+                    log(`  ${c.gray(`↳ Translated ${count(fresh.length, 'chapter')} in ${Math.round((Date.now() - started) / 1000)} s`)}`);
+                }
             }
-            log(`  ${c.gray(`↳ Translated ${count(items.length, 'chapter')} in ${Math.round((Date.now() - started) / 1000)} s`)}`);
 
+            // The title is created with the first chapter; the rest of the batch joins it.
+            // If creating it fails, the rest are kept too, without asking again.
             let contentId = null;
+            let titleError = null;
             for (const { job, chapter } of items) {
                 try {
                     if (lost.has(job.id)) throw new LostJobError('Lease lost while translating.');
-                    // The title is created with the first chapter; the rest of the batch joins it.
-                    contentId = await uploadJob(contentId && !job.content_id ? { ...job, content_id: contentId } : job, series, chapter, settings);
+                    ({ contentId, titleError } = await uploadJob(contentId && !job.content_id ? { ...job, content_id: contentId } : job, series, chapter, settings, { skipTitle: titleError }));
                     release(job);
                     done++;
                 } catch (error) {
@@ -1047,6 +1103,11 @@ function montoonTitleFor(query, titles) {
  */
 async function titleToTranslate(query) {
     const titles = await fetchMontoonTitles(montoonConfig(), '?renewed=all');
+    // `genres` in the feed came with the server's one-title claim: without it,
+    // claiming would hand out other titles' jobs.
+    if (titles.length && !('genres' in titles[0])) {
+        fail('montoon.mn runs an older backend that cannot claim one title\'s jobs. Deploy montoon_backend (0f93ef0 or newer), then run this again.');
+    }
     let existing = montoonTitleFor(query, titles);
 
     if (existing && existing.latest_episode !== null) {
