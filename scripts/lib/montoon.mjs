@@ -55,13 +55,21 @@ export function montoonConfig() {
 /** [query] e.g. "?renewed=all" for every title, old translations included. */
 export async function fetchMontoonTitles({ base, token }, query = '') {
     let response;
-    try {
-        response = await fetch(`${base}/v2/sync/titles${query}`, {
-            headers: { 'X-Sync-Token': token, Accept: 'application/json' },
-            signal: AbortSignal.timeout(30_000),
-        });
-    } catch (error) {
-        fail(`Could not reach ${base} (${error.cause?.message || error.message}).`);
+    // The sync routes allow 30 requests a minute per IP; a busy minute (many
+    // worker calls from this network) answers 429. Wait it out, a few times.
+    for (let attempt = 1; ; attempt++) {
+        try {
+            response = await fetch(`${base}/v2/sync/titles${query}`, {
+                headers: { 'X-Sync-Token': token, Accept: 'application/json' },
+                signal: AbortSignal.timeout(30_000),
+            });
+        } catch (error) {
+            fail(`Could not reach ${base} (${error.cause?.message || error.message}).`);
+        }
+        if (response.status !== 429 || attempt >= 4) break;
+        const wait = Math.min(120, Math.max(5, Number(response.headers.get('retry-after')) || 60));
+        console.error(`⚠ Montoon is rate-limiting this PC (too many requests this minute). Retrying in ${wait} s…`);
+        await new Promise(resolve => setTimeout(resolve, wait * 1000));
     }
     // Unknown routes fall through to the website, which answers 200 with HTML.
     const isJson = (response.headers.get('content-type') || '').includes('json');
