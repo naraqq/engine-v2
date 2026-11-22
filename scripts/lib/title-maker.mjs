@@ -291,7 +291,8 @@ export async function ensureTitleOnMontoon({ workerTitleId, sourceId, seriesUrl,
         original_description: info.description || '',
         type: meta.type,
         status: meta.status,
-        author: info.author || '',
+        // Always sent: older backends read it without a fallback (500 when missing).
+        author: info.author || 'Unknown',
         age_limit: String(meta.age_limit),
     };
     for (const [name, value] of Object.entries(fields)) if (value !== '') form.append(name, String(value));
