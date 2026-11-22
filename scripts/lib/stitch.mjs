@@ -46,9 +46,12 @@ export async function stitchChapter(srcDir, destDir, opts = {}) {
         pages.push({ file, name, width, height });
     }
 
-    // Common width: the most frequent one. Odd-width strips are scaled to it.
+    // Common width: the one most of the chapter's height is at (not the most
+    // files: two wide banners would outvote two long 720 px strips, and a
+    // 720×25600 strip scaled up to 2560 is past JPEG's 65535 px limit).
+    // Odd-width strips are scaled to it when stacked with others.
     const counts = new Map();
-    for (const p of pages) counts.set(p.width, (counts.get(p.width) ?? 0) + 1);
+    for (const p of pages) counts.set(p.width, (counts.get(p.width) ?? 0) + p.height);
     const width = [...counts].sort((a, b) => b[1] - a[1])[0][0];
     const scaled = p => Math.round(p.height * width / p.width);
 
@@ -74,8 +77,10 @@ export async function stitchChapter(srcDir, destDir, opts = {}) {
     const digits = Math.max(2, String(groups.length).length);
     for (const [i, g] of groups.entries()) {
         const out = path.join(destDir, `${String(i + 1).padStart(digits, '0')}${ext}`);
-        if (g.length === 1 && g[0].width === width) {
-            copyFileSync(g[0].file, out);
+        // A page on its own needs no common width: keep it as it is, never scaled
+        // up (and the copy keeps its own format, so use its own extension).
+        if (g.length === 1) {
+            copyFileSync(g[0].file, path.extname(g[0].file).toLowerCase() === ext ? out : out.replace(/\.[^.]+$/, path.extname(g[0].file).toLowerCase()));
             continue;
         }
         const layers = [];
