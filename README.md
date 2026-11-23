@@ -88,7 +88,7 @@ Every plan does this too, so a normal `--work` worker fixes complaints on its ow
 - Only renewed titles are fixed. Old (v1) translations are skipped.
 - Each reported episode is found on the title's source site by its episode number. It's then re-downloaded and **re-translated from scratch**, with fresh OCR and the extra "native editor" polish pass.
 - The episode's pages are **replaced in place**, and the change is live right away. Release state, access and price don't change. The episode's complaints are marked resolved.
-- The old pages are kept on Montoon. To undo a fix: `POST /api/admin/episodes/{id}/undo-fix`.
+- The original pages are kept until an admin reviews the fix in **Admin → Fix Reviews**. That screen shows both versions side by side, and the admin keeps one. The other version's files are deleted for good. The sidebar badge counts the fixes waiting for review. Fixes are live whether or not anyone has reviewed them yet.
 - An episode number the source doesn't have is listed as *fix by hand* in the activity log.
 
 ## Growing titles
@@ -159,7 +159,7 @@ If the translator prints nothing for 15 minutes (for example, a stuck GPU driver
 
 ## Activity and logs
 
-- **Montoon admin → Activity**: plans, uploads, complaint checks, fixes (with undo), new titles, releases and failures from every worker, newest first. *Fixes* has its own filter, and *Episodes fixed* is counted for the last 24 hours.
+- **Montoon admin → Activity**: plans, uploads, complaint checks, fixes and fix reviews, new titles, releases and failures from every worker, newest first. *Fixes* has its own filter, and *Episodes fixed* is counted for the last 24 hours.
 - **This PC:** `logs/combined.log` (translator and engine), `logs/download-cli-server.log` (the engine the worker starts), `logs/error.log`.
 
 ## Other commands
