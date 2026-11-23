@@ -20,10 +20,10 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { ROOT, api, c, chapterNumber, childPids, describeNumbers, ensureServer, fail, follow, killChildren, killTree, normalize, say, sleep, status, track } from './cli.mjs';
+import { ROOT, api, c, chapterNumber, childPids, describeNumbers, ensureServer, fail, follow, isStopping, killTree, normalize, say, sleep, status, stopEverything, track } from './cli.mjs';
 import { fetchMontoonTitles, findOnSource, montoonConfig, resultUrl, syncMontoon } from './montoon.mjs';
 import { LostJobError, flushEvents, log, logEvent, mt } from './montoon-api.mjs';
-import { DIRS, removeLocalChapter, translatedPages, uploadChapter } from './upload.mjs';
+import { DIRS, removeLocalChapter, replaceEpisode, translatedPages, uploadChapter } from './upload.mjs';
 import { stitchChapter } from './stitch.mjs';
 import { ensureTitleOnMontoon } from './title-maker.mjs';
 import { findByOtherNames } from './aliases.mjs';
@@ -42,6 +42,15 @@ const count = (n, one, many = one + 's') => `${n} ${n === 1 ? one : many}`;
  * releases launch_drop of them at once), never fewer than first_chapters.
  */
 const firstChapterCount = settings => Math.max(settings.first_chapters || 0, settings.launch_episodes || 0) || 5;
+
+/**
+ * A "growing" title has fewer episodes on Montoon than this (launch_episodes,
+ * default 30). Its next episodes up to that count jump the queue: a new title
+ * has no readers yet, so by reads alone it would wait behind every popular
+ * title's backlog and never get the episodes it needs to find readers.
+ */
+const growTarget = settings => Number(settings?.launch_episodes) || 30;
+const isGrowing = (title, settings) => title.latest_episode !== null && (Number(title.episodes_count) || 0) < growTarget(settings);
 
 // ---------------------------------------------------------------- planner
 
@@ -67,7 +76,12 @@ async function maybePlan(settings, opts, genre = null) {
     log(c.bold(c.cyan(`▶ Planning${genre ? ` ${genre.slug} only` : ''} (this worker holds the ${name} lock; next plan in ${settings.plan_every_minutes} min)`)));
     const summary = genre ? { genre: genre.slug } : {};
     try {
-        summary.episodes = await planEpisodes(genre);
+        summary.fixes = await planFixes({ genre });
+    } catch (error) {
+        log(c.red(`✖ Complaint check failed: ${error.message}`));
+    }
+    try {
+        summary.episodes = await planEpisodes(settings, { genre });
     } catch (error) {
         log(c.red(`✖ Episode check failed: ${error.message}`));
     }
@@ -144,6 +158,117 @@ const chapterJob = ({ site, url, chapter, title, contentId = null, workerTitleId
 });
 
 /**
+ * Complaint fixes run before everything but admin requests (200): a reported
+ * episode is a live page readers are stuck on right now. 170 + its number of
+ * complaints (up to 199), so the most-complained episode is fixed first; the
+ * server never keeps a worker on one title in this tier.
+ */
+const fixPriority = complaints => 170 + Math.min(29, Math.max(1, complaints));
+
+/**
+ * Reader complaints → fix jobs. Each reported episode of a renewed title is
+ * found on its source (the same series lookup as the episode check),
+ * re-downloaded, re-translated from scratch and its pages replaced in place.
+ * Reports nobody can fix by re-translating (e.g. "other") stay for a person.
+ * dryRun: only show what would be fixed.
+ */
+async function planFixes({ genre = null, dryRun = false } = {}) {
+    log(c.cyan(`▶ Checking reader complaints${genre ? ` on ${genre.slug} titles` : ''}`));
+    let reported;
+    try {
+        reported = (await mt('GET', '/episode-reports', undefined, { waitOffline: false })).data;
+    } catch (error) {
+        if (/could not be found|is not available|HTTP 404/i.test(error.message)) {
+            log(c.yellow('  ⚠ The Montoon backend has no complaint endpoint yet. Deploy it to fix reported episodes.'));
+            return { reported: 0, queued: 0 };
+        }
+        throw error;
+    }
+    // Old (v1) translations are being taken down: not worth fixing.
+    const old = reported.filter(r => !r.translation_renewed).length;
+    // An episode replaced after its newest complaint is waiting for readers to confirm, not broken.
+    reported = reported
+        .filter(r => r.translation_renewed)
+        .filter(r => !r.replaced_at || Date.parse(r.replaced_at) < Date.parse(r.last_report_at))
+        .sort((a, b) => b.report_ids.length - a.report_ids.length);
+    if (old) log(c.gray(`  ↳ ${count(old, 'reported episode')} of old translations skipped.`));
+    if (!reported.length) {
+        log(c.gray('  ↳ No open complaints a re-translation can fix.'));
+        return { reported: 0, queued: 0 };
+    }
+    const byTitle = new Map();
+    for (const r of reported) {
+        if (!byTitle.has(r.content_id)) byTitle.set(r.content_id, new Map());
+        byTitle.get(r.content_id).set(Number(r.episode_number), r);
+    }
+    log(c.gray(`  ↳ ${count(reported.length, 'reported episode')} in ${count(byTitle.size, 'title')}; most complained: `
+        + reported.slice(0, 3).map(r => `${r.title} ${r.episode_number} (${r.report_ids.length})`).join(', ') + '.'));
+
+    const missing = [];
+    const totals = await syncMontoon({
+        from: EPISODE_SITES,
+        format: 'images',
+        dryRun,
+        filter: {
+            test: t => byTitle.has(t.id) && (!genre || titleHasGenre(t, genre.slug)),
+            label: 'with complaints',
+        },
+        wanted: t => new Set(byTitle.get(t.id).keys()),
+        onMissing: ({ title, numbers }) => numbers.forEach(n => missing.push(`${title.title || title.title_mn} ${n}`)),
+        enqueue: ({ title, site, url, chapters }) => queueJobs(chapters.map(chapter => {
+            const report = byTitle.get(title.id).get(chapter.number);
+            const job = chapterJob({
+                site, url, chapter,
+                title: title.title || title.title_mn,
+                contentId: title.id,
+                priority: fixPriority(report.report_ids.length),
+                reason: 'complaint fix',
+            });
+            // Its own key (the chapter's normal job is long done), one per fix of the episode:
+            // more complaints before the fix raise its priority; one after a fix makes a new job.
+            job.key = `fix:${report.episode_id}:${report.replaced_at ? Date.parse(report.replaced_at) : 0}`;
+            job.payload.replace_episode_id = report.episode_id;
+            job.payload.report_ids = report.report_ids;
+            return job;
+        })),
+    }, DIRS.downloads);
+    if (missing.length) log(c.yellow(`  ⚠ Not found on their source, fix by hand: ${missing.slice(0, 10).join(', ')}${missing.length > 10 ? ` and ${missing.length - 10} more` : ''}`));
+    if (totals.notFoundTitles.length) log(c.yellow(`  ⚠ Titles not on ${EPISODE_SITES}: ${totals.notFoundTitles.join(', ')}`));
+
+    // One line on the activity timeline per check: what was found, what was queued, what needs a person.
+    if (!dryRun) {
+        const parts = [`${count(reported.length, 'reported episode')} in ${count(byTitle.size, 'title')}`];
+        parts.push(totals.pending
+            ? `${count(totals.pending, 'episode')} queued for a fix, most complained first (${reported.slice(0, 3).map(r => `${r.title} ${r.episode_number} ×${r.report_ids.length}`).join(', ')})`
+            : 'nothing queued');
+        if (missing.length) parts.push(`fix by hand, not on their source: ${missing.slice(0, 8).join(', ')}${missing.length > 8 ? ` and ${missing.length - 8} more` : ''}`);
+        if (totals.notFoundTitles.length) parts.push(`title not found on ${EPISODE_SITES}: ${totals.notFoundTitles.slice(0, 5).join(', ')}`);
+        if (totals.failedTitles.length) parts.push(`couldn't check (retried next plan): ${totals.failedTitles.slice(0, 5).join(', ')}`);
+        if (old) parts.push(`${count(old, 'episode')} of old translations skipped`);
+        logEvent('plan', `Reader complaints${genre ? ` (${genre.slug})` : ''}: ${parts.join('; ')}`, {
+            level: missing.length || totals.notFoundTitles.length || totals.failedTitles.length ? 'warning' : 'info',
+            data: {
+                reported: reported.length,
+                titles: byTitle.size,
+                queued: totals.pending,
+                old_skipped: old,
+                fix_by_hand: missing,
+                not_found_titles: totals.notFoundTitles,
+                failed_titles: totals.failedTitles,
+                top: reported.slice(0, 10).map(r => ({ episode_id: r.episode_id, title: r.title, episode: r.episode_number, complaints: r.report_ids.length })),
+            },
+        });
+    }
+    return {
+        reported: reported.length,
+        queued: totals.pending,
+        missing: missing.length,
+        not_found_titles: totals.notFoundTitles,
+        failed_titles: totals.failedTitles,
+    };
+}
+
+/**
  * A title's readership from Montoon's sync feed: unique readers in the last
  * 7 days, plus a little of the last 30 so a quiet week doesn't sink a title
  * people follow. null from an older server that doesn't send it.
@@ -155,28 +280,44 @@ const readsOf = t => {
 
 /**
  * Job priority for a title's new episodes (higher runs first), always above
- * the new-title jobs (5):
+ * the new-title jobs (60):
+ *   - growing titles (see isGrowing) first: 120–164 for the episodes that bring
+ *     them up to the target, next episode first, so every growing title moves
+ *     together; still below admin requests (200);
  *   - popular titles first: up to +50 by reads, relative to the most-read title;
  *   - next episode first: up to +44 for the first missing episode, falling off
  *     with its place in the backlog, so a title with 100+ waiting can't hold
  *     the queue while other titles wait for their next one.
  * Without read counts every title gets the middle popularity score.
  */
-function episodePriority(title, titles, position) {
+function episodePriority(title, titles, position, settings) {
+    const missing = growTarget(settings) - (Number(title.episodes_count) || 0);
+    if (isGrowing(title, settings) && position < missing) {
+        return 120 + Math.round(44 / (1 + position / 2));
+    }
     const reads = readsOf(title);
     const max = Math.max(0, ...titles.map(readsOf).filter(v => v !== null));
     const popularity = reads === null || max === 0 ? 0.5 : Math.sqrt(reads / max);
     return 6 + Math.round(50 * popularity + 44 / (1 + position / 2));
 }
 
-/** New episodes of Montoon's own titles: the --montoon check, queued. */
-async function planEpisodes(genre = null) {
-    log(c.cyan(`▶ Checking Montoon ${genre ? `${genre.slug} ` : ''}titles for new episodes`));
+/**
+ * New episodes of Montoon's own titles: the --montoon check, queued.
+ * genre: only that genre's titles (--work --genre). growingOnly: only the
+ * growing titles (download --grow-titles), a quick check.
+ */
+async function planEpisodes(settings, { genre = null, growingOnly = false } = {}) {
+    log(c.cyan(growingOnly
+        ? `▶ Checking growing ${genre ? `${genre.slug} ` : ''}titles (under ${growTarget(settings)} episodes on Montoon) for new episodes`
+        : `▶ Checking Montoon ${genre ? `${genre.slug} ` : ''}titles for new episodes`));
     const checked = [];
     const totals = await syncMontoon({
         from: EPISODE_SITES,
         format: 'images',
-        filter: genre ? { test: t => titleHasGenre(t, genre.slug), label: `in ${genre.slug}` } : undefined,
+        filter: genre || growingOnly ? {
+            test: t => (!genre || titleHasGenre(t, genre.slug)) && (!growingOnly || isGrowing(t, settings)),
+            label: [genre && `in ${genre.slug}`, growingOnly && `growing (under ${growTarget(settings)} episodes)`].filter(Boolean).join(', '),
+        } : undefined,
         onChecked: ({ title, site, chapters }) => checked.push({
             content_id: title.id,
             keep: chapters.map(chapter => `${site.id}:${chapter.id}`),
@@ -185,7 +326,7 @@ async function planEpisodes(genre = null) {
             site, url, chapter,
             title: title.title || title.title_mn,
             contentId: title.id,
-            priority: episodePriority(title, titles, position),
+            priority: episodePriority(title, titles, position, settings),
             reason: 'new episode',
         }))),
     }, DIRS.downloads);
@@ -659,17 +800,39 @@ async function placeChapter(found, sourceId) {
  * Runs the translator on one downloaded chapter (OCR on this PC's GPU, then
  * Gemini). Its main steps are shown in the worker log.
  */
-function translateChapters(series, chapters) {
+/**
+ * Minutes the translator may go without printing anything before it's taken
+ * as hung (e.g. a stuck GPU driver) and killed, so the jobs fail and are
+ * retried instead of blocking the worker forever. Every OCR'd page prints a
+ * line, and a page takes well under a minute; a Gemini call with all its
+ * retries is ~3 min.
+ */
+const STALL_MINUTES = Math.max(1, Number(process.env.TRANSLATOR_STALL_MINUTES) || 15);
+
+function translateChapters(series, chapters, { fix = false } = {}) {
     return new Promise((resolve, reject) => {
-        const child = track(spawn(process.execPath, ['--no-warnings', '--import', 'tsx', 'src/translator/cli.ts', series, ...chapters], {
+        if (isStopping()) return reject(new Error('Stopping.'));
+        // A complaint fix redoes everything (no cached OCR or translation) and adds the
+        // "native editor" polish pass: the first translation is what readers complained about.
+        const args = ['--no-warnings', '--import', 'tsx', 'src/translator/cli.ts', series, ...chapters, ...(fix ? ['--force'] : [])];
+        const child = track(spawn(process.execPath, args, {
             cwd: ROOT,
-            env: process.env,
+            env: fix ? { ...process.env, TRANSLATOR_POLISH: 'true' } : process.env,
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
         }));
         writePidFile();
         let lastError = '';
+        let stalled = false;
+        let lastOutput = Date.now();
+        const watchdog = setInterval(() => {
+            if (Date.now() - lastOutput < STALL_MINUTES * 60_000) return;
+            stalled = true;
+            clearInterval(watchdog);
+            killTree(child.pid);
+        }, 30_000);
         const onData = chunk => {
+            lastOutput = Date.now();
             for (const raw of chunk.toString().split(/\r?\n/)) {
                 const line = raw.replace(/\x1b\[[0-9;]*m/g, '').trim();
                 const m = line.match(/\[(info|warn|error)\]:\s*(.*)$/);
@@ -687,10 +850,13 @@ function translateChapters(series, chapters) {
         };
         child.stdout.on('data', onData);
         child.stderr.on('data', onData);
-        child.on('error', reject);
-        child.on('exit', code => (code === 0
-            ? resolve()
-            : reject(new Error(`Translation failed (exit ${code})${lastError ? `: ${lastError.slice(0, 300)}` : ''}`))));
+        child.on('error', error => { clearInterval(watchdog); reject(error); });
+        child.on('exit', code => {
+            clearInterval(watchdog);
+            if (stalled) reject(new Error(`Translator hung (no output for ${STALL_MINUTES} min); killed.`));
+            else if (code === 0) resolve();
+            else reject(new Error(`Translation failed (exit ${code})${lastError ? `: ${lastError.slice(0, 300)}` : ''}`));
+        });
     });
 }
 
@@ -698,7 +864,7 @@ function translateChapters(series, chapters) {
  * Chapters claimed at once. A title's chapters in one claim are translated
  * together (fewer requests, and context carries from chapter to chapter).
  */
-const BATCH_CHAPTERS = Math.min(10, Math.max(1, Number(process.env.WORKER_BATCH_CHAPTERS) || 5));
+const BATCH_CHAPTERS = Math.min(10, Math.max(1, Number(process.env.WORKER_BATCH_CHAPTERS) || 3));
 
 /** Jobs this worker holds right now (handed back on Ctrl+C). */
 let currentJobs = [];
@@ -766,6 +932,16 @@ async function uploadJob(job, series, chapter, settings, { skipTitle = null } = 
     const { dir: translatedDir, files } = translatedPages(series, chapter);
     if (!files.length) throw new Error('The translator produced no pages.');
 
+    if (p.replace_episode_id) {
+        const fixed = await replaceEpisode({ series, chapter, episodeId: p.replace_episode_id, reportIds: p.report_ids || [] });
+        // Not `episode_id`: completing a job with one schedules a new episode's release.
+        await mt('POST', `/jobs/${job.id}/complete`, { worker: WORKER, result: {
+            worker: WORKER, title: series, replaced_episode_id: fixed.episodeId, pages: fixed.pages, bytes: fixed.bytes, reports_resolved: fixed.reportsResolved,
+        } });
+        log(c.green(`  ✔ ${p.title} episode ${p.chapter_number} fixed (job #${job.id}).`));
+        return { contentId: job.content_id, titleError: skipTitle };
+    }
+
     // A new title is first added to Montoon (house content, with metadata and posters).
     let summary;
     let contentId = job.content_id;
@@ -822,6 +998,8 @@ async function processBatch(jobs, settings = null) {
     const release = job => { currentJobs = currentJobs.filter(j => j.id !== job.id); };
     const fail = async (job, error) => {
         release(job);
+        // Ctrl+C: the stop handler hands every job back itself (once, as "stopped").
+        if (isStopping()) return;
         if (error.lost || lost.has(job.id)) {
             log(c.yellow(`  ↷ Job #${job.id}: another worker took it over (our lease expired).`));
             return;
@@ -838,10 +1016,11 @@ async function processBatch(jobs, settings = null) {
         const ready = [];
         const kept = [];
         for (const job of jobs) {
+            if (isStopping()) break;
             const p = job.payload;
             say('');
             log(`${c.bold(c.cyan('⬇'))} ${c.bold(p.title)} chapter ${c.bold(p.chapter_number)} ${c.gray(`from ${p.source_id} · job #${job.id} · ${p.reason} · try ${job.attempts}/${job.max_attempts}`)}`);
-            const already = keptChapter(job);
+            const already = p.replace_episode_id ? null : keptChapter(job);
             if (already) {
                 log(`  ${c.gray('↳ Already translated on this PC: uploading it as is.')}`);
                 kept.push({ job, ...already });
@@ -858,20 +1037,22 @@ async function processBatch(jobs, settings = null) {
         const bySeries = new Map();
         for (const item of [...kept, ...ready]) bySeries.set(item.series, [...(bySeries.get(item.series) || []), item]);
         for (const [series, items] of bySeries) {
+            if (isStopping()) break;
             items.sort((a, b) => Number(a.job.payload.chapter_number) - Number(b.job.payload.chapter_number));
             const fresh = items.filter(i => !kept.includes(i));
-            if (fresh.length) {
+            // Complaint fixes and new chapters are translated in separate runs (fixes redo everything).
+            for (const fix of [true, false]) {
+                const group = fresh.filter(i => Boolean(i.job.payload.replace_episode_id) === fix);
+                if (!group.length || isStopping()) continue;
                 say('');
-                log(`  ${c.cyan('✎')} Translating ${series}: ${fresh.map(i => i.chapter).join(', ')}…`);
+                log(`  ${c.cyan('✎')} ${fix ? 'Re-translating (complaint fix)' : 'Translating'} ${series}: ${group.map(i => i.chapter).join(', ')}…`);
                 const started = Date.now();
                 try {
-                    await translateChapters(series, fresh.map(i => i.chapter));
+                    await translateChapters(series, group.map(i => i.chapter), { fix });
+                    log(`  ${c.gray(`↳ Translated ${count(group.length, 'chapter')} in ${Math.round((Date.now() - started) / 1000)} s`)}`);
                 } catch (error) {
-                    for (const { job } of fresh) await fail(job, error);
-                    items.splice(0, items.length, ...items.filter(i => kept.includes(i)));
-                }
-                if (items.some(i => !kept.includes(i))) {
-                    log(`  ${c.gray(`↳ Translated ${count(fresh.length, 'chapter')} in ${Math.round((Date.now() - started) / 1000)} s`)}`);
+                    for (const { job } of group) await fail(job, error);
+                    items.splice(0, items.length, ...items.filter(i => !group.includes(i)));
                 }
             }
 
@@ -880,6 +1061,7 @@ async function processBatch(jobs, settings = null) {
             let contentId = null;
             let titleError = null;
             for (const { job, chapter } of items) {
+                if (isStopping()) break;
                 try {
                     if (lost.has(job.id)) throw new LostJobError('Lease lost while translating.');
                     ({ contentId, titleError } = await uploadJob(contentId && !job.content_id ? { ...job, content_id: contentId } : job, series, chapter, settings, { skipTitle: titleError }));
@@ -950,8 +1132,9 @@ function installStopHandler() {
         stopping = true;
         say('');
         log(c.yellow(`Stopping now (${signal})…`));
-        killChildren();
-        const jobs = currentJobs;
+        const jobs = [...currentJobs];
+        // Cancel our downloads inside the engine, kill the translator and engine trees.
+        await stopEverything();
         if (jobs.length) {
             // Back to the queue right away instead of after the lease expires.
             await Promise.race([
@@ -1004,6 +1187,20 @@ async function genreScope(genre) {
     };
 }
 
+/** download --fix-reports --dry-run: what the complaint check would queue, nothing else. */
+export async function showFixes(opts) {
+    montoonConfig();
+    const genre = opts.genre ? await resolveGenre(opts.genre) : null;
+    const stopEngine = await ensureServer();
+    try {
+        const result = await planFixes({ genre, dryRun: true });
+        say('');
+        say(c.bold(`${count(result.queued ?? 0, 'reported episode')} would be re-translated and replaced (of ${result.reported} with open complaints).`));
+    } finally {
+        stopEngine();
+    }
+}
+
 export async function runWorker(opts) {
     montoonConfig(); // fails early without a token
     const genre = opts.genre ? await resolveGenre(opts.genre) : null;
@@ -1020,7 +1217,18 @@ export async function runWorker(opts) {
     let scope = null, scopeAt = 0;
     logEvent('worker', `${WORKER} started${genre ? ` (${genre.slug} only)` : ''}${opts.noPlan ? ' (jobs only, no planning)' : ''}`);
     try {
+        if (opts.fixReports) {
+            const result = await planFixes({ genre });
+            log(c.bold(c.cyan(`▶ Complaints: ${count(result.queued ?? 0, 'reported episode')} queued for a fix, ahead of new episodes.`)));
+        }
+        if (opts.growTitles) {
+            const { settings } = (await mt('POST', '/heartbeat', { worker: WORKER, info: { platform: process.platform, done } })).data;
+            const result = await planEpisodes(settings, { genre, growingOnly: true });
+            log(c.bold(c.cyan(`▶ Growing titles: ${count(result.titles ?? 0, 'title')} with ${count(result.episodes ?? 0, 'episode')} queued ahead of the rest.`)));
+            logEvent('plan', `Grow titles: ${count(result.titles ?? 0, 'title')}, ${count(result.episodes ?? 0, 'episode')} queued first`, { data: result });
+        }
         for (;;) {
+            if (isStopping()) break;
             const settings = (await mt('POST', '/heartbeat', { worker: WORKER, info: { platform: process.platform, done, genre: genre?.slug ?? null } })).data.settings;
             if (!settings.enabled) {
                 if (!paused) log(c.yellow('⏸ Paused from the server. Waiting…'));
@@ -1048,6 +1256,7 @@ export async function runWorker(opts) {
                 await handleTitleRequests(settings).catch(error => log(c.red(`✖ Title requests failed: ${error.message}`)));
             }
 
+            if (isStopping()) break;
             const claimed = await mt('POST', '/jobs/claim', { worker: WORKER, limit: BATCH_CHAPTERS, ttl: JOB_TTL, ...(scope || {}) });
             const jobs = claimed.data;
             if (scope && jobs.some(j => !scope.content_ids.includes(j.content_id) && !scope.worker_title_ids.includes(j.worker_title_id))) {
@@ -1217,6 +1426,7 @@ export async function translateTitle(opts) {
 
         const keys = new Set(jobs.map(j => j.key));
         for (;;) {
+            if (isStopping()) break;
             const claimed = (await mt('POST', '/jobs/claim', { worker: WORKER, limit: BATCH_CHAPTERS, ttl: JOB_TTL, keys: [...keys] })).data;
             if (claimed.some(job => !keys.has(job.key))) {
                 // An older server ignores `keys` and hands out anything: give it all back.

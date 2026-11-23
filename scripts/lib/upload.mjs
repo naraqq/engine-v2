@@ -56,36 +56,13 @@ export function removeLocalChapter(series, chapter) {
     return removed;
 }
 
-/**
- * Upload one translated chapter. Returns { episodeId, pages } or, when the
- * episode already exists on Montoon, { exists: true }.
- */
-export async function uploadChapter({ series, chapter, contentId, episodeNumber, title = null, keep = false, indent = '  ' }) {
-    const { dir, files } = translatedPages(series, chapter);
-    if (!files.length) throw new Error(`No translated pages in ${dir}. Translate the chapter first.`);
-    const number = episodeNumber ?? numberFromFolder(chapter);
-    if (!Number.isFinite(number)) throw new Error(`Can't tell the episode number from "${chapter}". Pass --episode <n>.`);
+const fileSpecs = files => files.map(f => ({ ext: path.extname(f).slice(1).toLowerCase(), content_type: TYPES[path.extname(f).toLowerCase()] }));
 
-    log(`${indent}${c.cyan('⇪')} Uploading ${c.bold(`${series} ${chapter}`)} → Montoon #${contentId}, episode ${number} ${c.gray(`(${files.length} pages)`)}`);
-    let prepared;
-    try {
-        prepared = (await mt('POST', '/episodes/prepare', {
-            content_id: contentId,
-            episode_number: number,
-            files: files.map(f => ({ ext: path.extname(f).slice(1).toLowerCase(), content_type: TYPES[path.extname(f).toLowerCase()] })),
-        }, { waitOffline: false })).data;
-    } catch (error) {
-        if (error.code === 'episode_exists') {
-            log(`${indent}${c.yellow('↷')} ${error.message} Nothing uploaded.`);
-            return { exists: true };
-        }
-        throw error;
-    }
-    log(`${indent}${c.gray(`↳ Montoon title: "${prepared.content.title}" · storage folder ${prepared.folder}/`)}`);
-
+/** PUTs each page to its upload target (presigned storage URL or the API). Returns bytes sent. */
+async function putPages(targets, dir, files, indent) {
     const token = process.env.MONTOON_SYNC_TOKEN;
     let bytes = 0;
-    for (const [i, target] of prepared.files.entries()) {
+    for (const [i, target] of targets.entries()) {
         const body = readFileSync(path.join(dir, files[i]));
         status(`${indent}${c.gray('↳ Uploading pages')} ${i + 1}/${files.length}`);
         const headers = target.via === 'api'
@@ -104,6 +81,61 @@ export async function uploadChapter({ series, chapter, contentId, episodeNumber,
         bytes += body.length;
     }
     log(`${indent}${c.gray(`↳ ${files.length} pages uploaded (${(bytes / 1048576).toFixed(1)} MB)`)}`);
+    return bytes;
+}
+
+/**
+ * Complaint fix: replaces the pages of an existing Montoon episode with a
+ * fresh translation, in place (its release state, access and price stay), and
+ * resolves the reports it answers. The old pages are kept on Montoon for undo.
+ */
+export async function replaceEpisode({ series, chapter, episodeId, reportIds = [], keep = false, indent = '  ' }) {
+    const { dir, files } = translatedPages(series, chapter);
+    if (!files.length) throw new Error(`No translated pages in ${dir}. Translate the chapter first.`);
+    log(`${indent}${c.cyan('⇪')} Replacing the pages of Montoon episode #${episodeId} with ${c.bold(`${series} ${chapter}`)} ${c.gray(`(${files.length} pages)`)}`);
+    const prepared = (await mt('POST', `/episodes/${episodeId}/replace/prepare`, { files: fileSpecs(files) }, { waitOffline: false })).data;
+    const bytes = await putPages(prepared.files, dir, files, indent);
+    const result = (await mt('POST', `/episodes/${episodeId}/replace`, {
+        paths: prepared.files.map(f => f.path),
+        report_ids: reportIds,
+        worker: workerName(),
+    }, { waitOffline: false })).data;
+    log(`${indent}${c.green(`✔ Episode ${result.episode_number} of "${prepared.content.title}" replaced`)} ${c.gray(`(${result.pages} pages; ${result.reports_resolved} complaint${result.reports_resolved === 1 ? '' : 's'} resolved; old pages kept for undo)`)}`);
+    if (!keep) {
+        const removed = removeLocalChapter(series, chapter);
+        if (removed.length) log(`${indent}${c.gray(`↳ Removed local copies: ${removed.join(', ')}`)}`);
+    }
+    return { episodeId, pages: files.length, bytes, reportsResolved: result.reports_resolved };
+}
+
+/**
+ * Upload one translated chapter. Returns { episodeId, pages } or, when the
+ * episode already exists on Montoon, { exists: true }.
+ */
+export async function uploadChapter({ series, chapter, contentId, episodeNumber, title = null, keep = false, indent = '  ' }) {
+    const { dir, files } = translatedPages(series, chapter);
+    if (!files.length) throw new Error(`No translated pages in ${dir}. Translate the chapter first.`);
+    const number = episodeNumber ?? numberFromFolder(chapter);
+    if (!Number.isFinite(number)) throw new Error(`Can't tell the episode number from "${chapter}". Pass --episode <n>.`);
+
+    log(`${indent}${c.cyan('⇪')} Uploading ${c.bold(`${series} ${chapter}`)} → Montoon #${contentId}, episode ${number} ${c.gray(`(${files.length} pages)`)}`);
+    let prepared;
+    try {
+        prepared = (await mt('POST', '/episodes/prepare', {
+            content_id: contentId,
+            episode_number: number,
+            files: fileSpecs(files),
+        }, { waitOffline: false })).data;
+    } catch (error) {
+        if (error.code === 'episode_exists') {
+            log(`${indent}${c.yellow('↷')} ${error.message} Nothing uploaded.`);
+            return { exists: true };
+        }
+        throw error;
+    }
+    log(`${indent}${c.gray(`↳ Montoon title: "${prepared.content.title}" · storage folder ${prepared.folder}/`)}`);
+
+    const bytes = await putPages(prepared.files, dir, files, indent);
 
     const episode = (await mt('POST', '/episodes', {
         content_id: contentId,

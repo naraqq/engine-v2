@@ -430,7 +430,14 @@ export async function syncMontoon(opts, outDir) {
                     .map(ch => ({ ...ch, number: chapterNumber(ch) }))
                     .filter(ch => Number.isFinite(ch.number));
                 const newest = numbered.length ? Math.max(...numbered.map(ch => ch.number)) : null;
-                const fresh = numbered.filter(ch => ch.number > have).sort((a, b) => a.number - b.number);
+                // wanted (complaint fixes): exactly these episode numbers, not what's new.
+                const wanted = opts.wanted?.(t);
+                const fresh = numbered.filter(ch => (wanted ? wanted.has(ch.number) : ch.number > have)).sort((a, b) => a.number - b.number);
+                if (wanted) {
+                    const missing = [...wanted].filter(n => !fresh.some(ch => ch.number === n));
+                    if (missing.length) say(c.yellow(`  ⚠ Not on ${target.site.title}: episode ${describeNumbers(missing)}. Fix those by hand.`));
+                    opts.onMissing?.({ title: t, numbers: missing });
+                }
                 say(c.gray(`  ↳ ${target.site.title} has ${chapters.length} chapters${newest !== null ? `, newest is ${newest}` : ''}.`));
                 // The title was read successfully: tell the caller what it wants now.
                 opts.onChecked?.({ title: t, site: target.site, url: target.url, chapters: fresh });
@@ -442,7 +449,7 @@ export async function syncMontoon(opts, outDir) {
                 }
                 const plural = fresh.length === 1 ? 'episode' : 'episodes';
                 totals.withNew++;
-                say(c.bold(c.yellow(`  ★ ${fresh.length} new ${plural} found: ${describeNumbers(fresh.map(ch => ch.number))}`)));
+                say(c.bold(c.yellow(`  ★ ${fresh.length} ${opts.wanted ? "reported" : "new"} ${plural} found: ${describeNumbers(fresh.map(ch => ch.number))}`)));
                 if (opts.dryRun) {
                     totals.pending += fresh.length;
                     totals.updated++;
@@ -487,7 +494,7 @@ export async function syncMontoon(opts, outDir) {
     say('');
     say(c.bold(c.cyan('▶ Summary')));
     if (opts.enqueue) {
-        say(`  ${c.bold(c.green(count(totals.updated, 'title')))} with ${c.bold(c.yellow(count(totals.pending, 'new episode')))} handed to the job queue.`);
+        say(`  ${c.bold(c.green(count(totals.updated, 'title')))} with ${c.bold(c.yellow(count(totals.pending, opts.wanted ? 'reported episode' : 'new episode')))} handed to the job queue.`);
     } else if (opts.dryRun) {
         say(`  ${c.bold(c.green(count(totals.updated, 'title')))} with ${c.bold(c.yellow(count(totals.pending, 'new episode')))} waiting.`);
     } else {

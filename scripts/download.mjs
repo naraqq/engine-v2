@@ -8,9 +8,9 @@
  */
 import path from 'node:path';
 import readline from 'node:readline/promises';
-import { ROOT, api, c, ensureServer, fail, follow, normalize, say, status, chapterNumber } from './lib/cli.mjs';
+import { ROOT, api, c, ensureServer, fail, follow, normalize, say, status, chapterNumber, stopEverything } from './lib/cli.mjs';
 import { editLinks, syncMontoon } from './lib/montoon.mjs';
-import { runWorker, setWorkerEnabled, stopLocalWorker, translateTitle, workerStatus } from './lib/worker.mjs';
+import { runWorker, setWorkerEnabled, showFixes, stopLocalWorker, translateTitle, workerStatus } from './lib/worker.mjs';
 import { DIRS, translatedPages, uploadChapter } from './lib/upload.mjs';
 import { montoonConfig } from './lib/montoon.mjs';
 import { readdirSync, existsSync } from 'node:fs';
@@ -42,6 +42,14 @@ const HELP = `Download a series, what's trending, or new episodes for Montoon.
 
   download --work                       nonstop worker: plans, downloads, translates, uploads
   download --work --once                plan now, work through the queue, then exit
+  download --grow-titles                queue the next episodes of growing titles (fewer than
+                                        launch_episodes, default 30, on Montoon) ahead of the rest,
+                                        then work as --work (add --once to exit when the queue is done)
+  download --fix-reports                fix episodes readers complained about (unreadable or wrong
+                                        translation, bad images…) on renewed titles, most complaints
+                                        first: re-download, re-translate from scratch and replace their
+                                        pages on Montoon, ahead of new episodes; then work as --work.
+                                        --dry-run only lists them. (Every plan checks too.)
   download --work --no-plan             only take jobs, never plan
   download --work --genre drama         one genre only: plans new episodes of Montoon's drama titles,
                                         picks only new drama titles, and takes only their jobs
@@ -73,7 +81,7 @@ function parseArgs(argv) {
     const takesValue = new Set(['source', 'latest', 'chapters', 'format', 'out', 'only', 'link', 'unlink', 'from', 'limit', 'upload', 'preview-title', 'to', 'episode', 'title', 'translate', 'genre']);
     const flags = {
         help: 'help', list: 'list', all: 'all', 'dry-run': 'dryRun', montoon: 'montoon',
-        work: 'work', once: 'once', keep: 'keep', 'no-plan': 'noPlan', plan: 'planNow', status: 'status', pause: 'pause', resume: 'resume', stop: 'stop',
+        work: 'work', once: 'once', keep: 'keep', 'no-plan': 'noPlan', plan: 'planNow', 'grow-titles': 'growTitles', 'fix-reports': 'fixReports', status: 'status', pause: 'pause', resume: 'resume', stop: 'stop',
     };
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
@@ -224,6 +232,8 @@ async function main() {
     if (opts['preview-title'] !== undefined) return previewTitleCommand(opts);
     if (opts.stop) return stopLocalWorker();
     if (opts.translate !== undefined) return translateTitle(opts);
+    if (opts.fixReports && opts.dryRun) return showFixes(opts);
+    if (opts.growTitles || opts.fixReports) opts.work = true;
     if (opts.work) {
         if (opts.status) return workerStatus();
         if (opts.pause || opts.resume) return setWorkerEnabled(Boolean(opts.resume));
@@ -236,10 +246,17 @@ async function main() {
         return;
     }
 
-    process.on('SIGINT', () => {
-        say('\nStopped.');
+    // Ctrl+C: cancel our downloads inside the engine and kill everything we started, then exit.
+    let stopping = false;
+    const stop = async () => {
+        if (stopping) return;
+        stopping = true;
+        say('\nStopping…');
+        await stopEverything();
+        say('Stopped.');
         process.exit(130);
-    });
+    };
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP']) process.on(signal, stop);
 
     if (opts.montoon) {
         if (opts.link || opts.unlink) return editLinks(opts);

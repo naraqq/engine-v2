@@ -19,9 +19,36 @@ export function fail(message) {
 
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// ------------------------------------------------------------- stopping
+
+let stopping = false;
+/** True once Ctrl+C was pressed: nothing new (engine, translator, download) may start. */
+export const isStopping = () => stopping;
+
+/** Downloads this process started in the engine and hasn't seen finish. */
+const activeDownloads = new Set();
+
+/**
+ * Ctrl+C: stop everything this process started, now. Downloads running inside
+ * the engine are cancelled first (the engine may be one you started yourself,
+ * which keeps running, so killing our own processes wouldn't stop them), then
+ * every child process tree is killed. Never throws; takes at most ~2.5 s.
+ */
+export async function stopEverything() {
+    stopping = true;
+    const ids = [...activeDownloads];
+    activeDownloads.clear();
+    await Promise.race([
+        Promise.all(ids.map(id => fetch(`${BASE}/api/v1/downloads/${id}/cancel`, { method: 'POST', signal: AbortSignal.timeout(2000) }).catch(() => {}))),
+        sleep(2500),
+    ]);
+    killChildren();
+}
+
 // ------------------------------------------------------------------ API
 
 export async function api(method, route, body) {
+    if (stopping && method === 'POST' && route.startsWith('/api/v1/downloads')) fail('Stopping.');
     let response;
     try {
         response = await fetch(BASE + route, {
@@ -36,6 +63,12 @@ export async function api(method, route, body) {
     if (!response.ok || payload.success === false) {
         const details = payload.error?.details ? ` ${JSON.stringify(payload.error.details)}` : '';
         throw new Error((payload.error?.message || `HTTP ${response.status}`) + details);
+    }
+    // Remember new downloads so Ctrl+C can cancel them (single or trending batch).
+    if (method === 'POST' && route.startsWith('/api/v1/downloads')) {
+        for (const d of [payload.data, ...(payload.data?.downloads || [])]) {
+            if (d?.id && !['completed', 'failed', 'cancelled'].includes(d.status)) activeDownloads.add(d.id);
+        }
     }
     return payload.data;
 }
@@ -84,6 +117,7 @@ process.once('exit', killChildren);
 
 /** Starts the API from source when nothing answers; returns a stop function. */
 export async function ensureServer() {
+    if (stopping) fail('Stopping.');
     if (await isUp()) return () => {};
 
     const port = new URL(BASE).port || '3000';
@@ -104,6 +138,7 @@ export async function ensureServer() {
 
     const deadline = Date.now() + 90_000;
     while (!(await isUp())) {
+        if (stopping) fail('Stopping.');
         if (exited) fail(`The engine stopped while starting. See ${logFile}`);
         if (Date.now() > deadline) {
             killTree(child.pid);
@@ -202,11 +237,13 @@ export function describeNumbers(numbers) {
 export async function follow(ids, label, indent = '') {
     const finished = new Map();
     while (finished.size < ids.length) {
+        if (stopping) fail('Stopping.');
         for (const id of ids) {
             if (finished.has(id)) continue;
             const d = await api('GET', `/api/v1/downloads/${id}`);
             if (d.status === 'completed' || d.status === 'failed' || d.status === 'cancelled') {
                 finished.set(id, d);
+                activeDownloads.delete(id);
                 const name = d.mangaTitle || d.mangaId;
                 say(d.status === 'completed'
                     ? `${indent}${c.green(`✔ ${name}`)}`
