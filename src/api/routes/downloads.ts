@@ -52,6 +52,16 @@ router.get(
 );
 
 /**
+ * POST /api/v1/downloads/:downloadId/cancel
+ * Stop a queued or running download (a finished one keeps its files)
+ */
+router.post(
+    '/:downloadId/cancel',
+    validate(schemas.downloadIdParam, 'params'),
+    asyncHandler(downloadsController.cancelDownload)
+);
+
+/**
  * DELETE /api/v1/downloads/:downloadId
  * Cancel/remove download
  */

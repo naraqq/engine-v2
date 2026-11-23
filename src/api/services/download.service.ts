@@ -18,6 +18,8 @@ class DownloadService {
     private downloads = new Map<string, DownloadStatus>();
     private downloadDir = config.storage.downloads;
     private sequentialQueue: Promise<void> = Promise.resolve();
+    /** Queued/running downloads, so they can be stopped (Ctrl+C in a CLI, cancel, DELETE). */
+    private aborts = new Map<string, AbortController>();
 
     constructor() {
         this.ensureDownloadDirectory();
@@ -68,14 +70,21 @@ class DownloadService {
         };
 
         this.downloads.set(downloadId, status);
+        const abort = new AbortController();
+        this.aborts.set(downloadId, abort);
 
-        const run = () => this.processDownload(downloadId, request, downloadPath).catch((error) => {
+        const run = () => this.processDownload(downloadId, request, downloadPath, abort.signal).catch((error) => {
+            if (abort.signal.aborted) {
+                logger.info(`Download ${downloadId} cancelled`);
+                this.updateDownloadStatus(downloadId, { status: 'cancelled', error: 'Cancelled' });
+                return;
+            }
             logger.error(`Download ${downloadId} failed:`, error);
             this.updateDownloadStatus(downloadId, {
                 status: 'failed',
                 error: error.message,
             });
-        });
+        }).finally(() => this.aborts.delete(downloadId));
 
         // Trending batches run one title at a time. Normal API downloads remain immediate.
         if (sequential) {
@@ -118,8 +127,9 @@ class DownloadService {
     /**
      * Process a download
      */
-    private async processDownload(downloadId: string, request: DownloadRequest, downloadPath: string): Promise<void> {
+    private async processDownload(downloadId: string, request: DownloadRequest, downloadPath: string, signal: AbortSignal): Promise<void> {
         try {
+            signal.throwIfAborted();
             this.updateDownloadStatus(downloadId, { status: 'downloading' });
 
             const plugin = engineService.getPluginController().WebsitePlugins.find(
@@ -164,9 +174,11 @@ class DownloadService {
             }
 
             // Get chapters
+            signal.throwIfAborted();
             if (manga.Entries.Value.length === 0) {
                 await manga.Update();
             }
+            signal.throwIfAborted();
             const chapters = await manga.Entries;
 
             // Log available chapter IDs for debugging
@@ -192,7 +204,7 @@ class DownloadService {
             });
 
             // Download chapters and create export
-            await this.downloadAndExport(downloadId, request, chaptersToDownload, manga.Title, downloadPath);
+            await this.downloadAndExport(downloadId, request, chaptersToDownload, manga.Title, downloadPath, signal);
 
             this.updateDownloadStatus(downloadId, {
                 status: 'completed',
@@ -201,6 +213,7 @@ class DownloadService {
                 fileUrl: `/api/v1/downloads/${downloadId}/file`,
             });
         } catch (error) {
+            if (signal.aborted) throw error;
             const errorMessage = error instanceof Error ? error.message : String(error);
             const errorStack = error instanceof Error ? error.stack : undefined;
             logger.error(`Download processing failed for ${downloadId}:`, {
@@ -222,12 +235,13 @@ class DownloadService {
      * "Vol.1 Chapter 3" -> "3"
      */
     /** One page image, retried with backoff so a single timeout doesn't sink the chapter. */
-    private async fetchPageWithRetry(page: any, attempts = 3): Promise<Blob> {
+    private async fetchPageWithRetry(page: any, signal: AbortSignal, attempts = 3): Promise<Blob> {
         for (let attempt = 1; ; attempt++) {
             try {
-                return await page.Fetch(Priority.Normal, new AbortController().signal);
+                signal.throwIfAborted();
+                return await page.Fetch(Priority.Normal, signal);
             } catch (error) {
-                if (attempt >= attempts) throw error;
+                if (signal.aborted || attempt >= attempts) throw error;
                 const message = error instanceof Error ? error.message : String(error);
                 logger.warn(`Page fetch failed (attempt ${attempt}/${attempts}), retrying: ${message}`);
                 await new Promise(resolve => setTimeout(resolve, 1500 * attempt));
@@ -260,7 +274,7 @@ class DownloadService {
     /**
      * Download chapters and create export file
      */
-    private async downloadAndExport(downloadId: string, request: DownloadRequest, chapters: any[], mangaTitle: string, downloadPath: string): Promise<string> {
+    private async downloadAndExport(downloadId: string, request: DownloadRequest, chapters: any[], mangaTitle: string, downloadPath: string, signal: AbortSignal): Promise<string> {
         const storageController = engineService.getStorageController();
         const format = request.format || 'cbz';
 
@@ -275,9 +289,12 @@ class DownloadService {
                 progress: Math.floor((chapterIndex / chapters.length) * 90), // Reserve last 10% for export
             });
 
+            const resourceMap = new Map<number, string>();
             try {
                 // Fetch pages for this chapter
+                signal.throwIfAborted();
                 await chapter.Update();
+                signal.throwIfAborted();
                 const pages = chapter.Entries.Value;
 
                 if (pages.length === 0) {
@@ -288,12 +305,11 @@ class DownloadService {
                 logger.info(`Fetching ${pages.length} pages for chapter: ${chapter.Title}`);
 
                 // Download all pages and store temporarily
-                const resourceMap = new Map<number, string>();
                 for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
                     const page = pages[pageIndex];
                     try {
                         logger.debug(`Fetching page ${pageIndex + 1}/${pages.length}: ${page.Link?.href}`);
-                        const imageBlob = await this.fetchPageWithRetry(page);
+                        const imageBlob = await this.fetchPageWithRetry(page, signal);
                         logger.debug(`Received blob: type=${imageBlob?.type}, size=${imageBlob?.size}`);
 
                         const tempKey = await storageController.SaveTemporary(imageBlob);
@@ -306,6 +322,7 @@ class DownloadService {
                             progress: Math.floor(chapterProgress * 90),
                         });
                     } catch (error) {
+                        if (signal.aborted) throw error;
                         const errorMessage = error instanceof Error ? error.message : String(error);
                         const errorStack = error instanceof Error ? error.stack : undefined;
                         logger.error(`Failed to download page ${pageIndex + 1} of chapter ${chapter.Title}:`, {
@@ -345,22 +362,18 @@ class DownloadService {
                 }
 
                 // Ensure parent directory exists
+                signal.throwIfAborted();
                 await fs.mkdir(path.dirname(outputPath), { recursive: true });
 
                 logger.info(`Exporting to ${format}: ${outputPath}`);
 
-                try {
-                    await exporter.Export(resourceMap, outputPath, chapter.Title, mangaTitle);
-                    logger.info(`Successfully exported chapter to: ${outputPath}`);
-                } finally {
-                    // Clean up temporary files
-                    const tempKeys = Array.from(resourceMap.values());
-                    await storageController.RemoveTemporary(...tempKeys);
-                }
+                await exporter.Export(resourceMap, outputPath, chapter.Title, mangaTitle);
+                logger.info(`Successfully exported chapter to: ${outputPath}`);
 
                 lastOutputPath = outputPath;
 
             } catch (error) {
+                if (signal.aborted) throw error;
                 const errorMessage = error instanceof Error ? error.message : String(error);
                 const errorStack = error instanceof Error ? error.stack : undefined;
                 logger.error(`Failed to process chapter ${chapter.Title}:`, {
@@ -370,6 +383,11 @@ class DownloadService {
                     chapterId: chapter.Identifier,
                 });
                 throw error;
+            } finally {
+                // Temporary page files go, also when the chapter failed or was cancelled midway.
+                if (resourceMap.size) {
+                    await storageController.RemoveTemporary(...resourceMap.values());
+                }
             }
         }
 
@@ -442,8 +460,21 @@ class DownloadService {
     /**
      * Delete a download
      */
+    /** Stops a queued or running download right away. A finished one (and its files) is left alone. */
+    public cancelDownload(downloadId: string): DownloadStatus {
+        const download = this.getDownload(downloadId);
+        const abort = this.aborts.get(downloadId);
+        if (abort && !abort.signal.aborted) {
+            abort.abort(new Error('Download cancelled'));
+            this.updateDownloadStatus(downloadId, { status: 'cancelled', error: 'Cancelled' });
+        }
+        return download;
+    }
+
     public async deleteDownload(downloadId: string): Promise<void> {
         const download = this.getDownload(downloadId);
+        // A running download is stopped, not just forgotten (it used to keep downloading).
+        this.aborts.get(downloadId)?.abort(new Error('Download cancelled'));
 
         // If completed, delete the file
         if (download.status === 'completed') {

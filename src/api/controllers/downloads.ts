@@ -125,6 +125,12 @@ export async function downloadFile(req: Request, res: Response): Promise<void> {
 /**
  * Cancel/remove download
  */
+/** Stops a queued or running download; a finished one keeps its files. */
+export async function cancelDownload(req: Request, res: Response): Promise<void> {
+    const response: ApiResponse<DownloadStatus> = { success: true, data: downloadService.cancelDownload(req.params.downloadId) };
+    res.json(response);
+}
+
 export async function deleteDownload(req: Request, res: Response): Promise<void> {
     const { downloadId } = req.params;
 
