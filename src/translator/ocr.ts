@@ -1,5 +1,4 @@
 import { PaddleOcrService, V5_EN_MOBILE_MODEL, V5_MOBILE_MODEL } from 'ppu-paddle-ocr';
-import sharp from 'sharp';
 import { config } from '../config/settings.js';
 import { logger } from '../config/logger.js';
 import { sliceTiles } from './tiles.js';
@@ -62,35 +61,40 @@ function iou(a: Box, b: Box): number {
 export async function ocrPage(file: string): Promise<{ width: number; height: number; lines: OcrLine[] }> {
     const ocr = await getService();
     const { tileHeight, tileOverlap, ocrScales } = config.translator;
-    const { width, height, tiles } = await sliceTiles(file, tileHeight, tileOverlap);
+    const { width, height, tiles, encode } = await sliceTiles(file, tileHeight, tileOverlap);
+
+    // Every (tile, scale) image, in order. The next one is encoded (CPU, sharp's thread pool)
+    // while the current one is being read (GPU), instead of the two taking turns.
+    const jobs = tiles.flatMap(tile => ocrScales.map(scale => ({ tile, scale })));
+    let next: Promise<Buffer> | null = jobs.length ? encode(jobs[0].tile, jobs[0].scale) : null;
 
     const found: OcrLine[] = [];
-    for (const tile of tiles) {
+    for (const [j, { tile, scale }] of jobs.entries()) {
         const isFirst = tile.top === 0;
         const isLast = tile.top + tile.height >= height;
 
-        for (const scale of ocrScales) {
-            const png = scale === 1 ? tile.data : await sharp(tile.data).resize({ width: Math.round(tile.width * scale), kernel: 'lanczos3' }).png().toBuffer();
-            const res = await ocr.recognize(png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength) as ArrayBuffer, { flatten: true, minimumConfidence: config.translator.ocrMinConfidence });
+        const png = await next!;
+        next = j + 1 < jobs.length ? encode(jobs[j + 1].tile, jobs[j + 1].scale) : null;
+        next?.catch(() => {}); // surfaced when awaited; avoids an unhandled rejection meanwhile
+        const res = await ocr.recognize(png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength) as ArrayBuffer, { flatten: true, minimumConfidence: config.translator.ocrMinConfidence });
 
-            for (const item of res.results) {
-                const text = item.text.trim();
-                if (!text) {
-                    continue;
-                }
-                const box = { x: item.box.x / scale, y: item.box.y / scale, w: item.box.width / scale, h: item.box.height / scale };
-                // Lines touching a cut edge are incomplete here; the overlapping tile has them whole.
-                const touchesTop = !isFirst && box.y <= 2;
-                const touchesBottom = !isLast && box.y + box.h >= tile.height - 2;
-                if (touchesTop || touchesBottom) {
-                    continue;
-                }
-                found.push({
-                    text,
-                    confidence: item.confidence,
-                    box: { x: Math.round(box.x), y: Math.round(tile.top + box.y), w: Math.round(box.w), h: Math.round(box.h) },
-                });
+        for (const item of res.results) {
+            const text = item.text.trim();
+            if (!text) {
+                continue;
             }
+            const box = { x: item.box.x / scale, y: item.box.y / scale, w: item.box.width / scale, h: item.box.height / scale };
+            // Lines touching a cut edge are incomplete here; the overlapping tile has them whole.
+            const touchesTop = !isFirst && box.y <= 2;
+            const touchesBottom = !isLast && box.y + box.h >= tile.height - 2;
+            if (touchesTop || touchesBottom) {
+                continue;
+            }
+            found.push({
+                text,
+                confidence: item.confidence,
+                box: { x: Math.round(box.x), y: Math.round(tile.top + box.y), w: Math.round(box.w), h: Math.round(box.h) },
+            });
         }
     }
 
