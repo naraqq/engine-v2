@@ -65,9 +65,11 @@ async function ocrChapter(series: string, chapter: string, opts: ChapterOptions)
         await fs.writeFile(jsonPath(file), JSON.stringify(page, null, 2) + '\n', 'utf8');
         pages.push(page);
         fresh++;
-        logger.info(`[${series}/${chapter}] OCR ${file}: ${page.regions.length} text blocks`);
+        logger.info(`[${series}/${chapter}] OCR ${file}: ${page.regions.length} text blocks${page.cjkLines ? ` (${page.cjkLines} line${page.cjkLines === 1 ? '' : 's'} in Chinese/Japanese)` : ''}`);
     }
-    logger.info(`[${series}/${chapter}] OCR done in ${Math.round((Date.now() - started) / 1000)}s (${fresh} new, ${files.length - fresh} cached)`);
+    const cjk = pages.reduce((n, p) => n + (p.cjkLines ?? 0), 0);
+    logger.info(`[${series}/${chapter}] OCR done in ${Math.round((Date.now() - started) / 1000)}s (${fresh} new, ${files.length - fresh} cached)`
+        + (cjk ? `; ${cjk} line${cjk === 1 ? '' : 's'} left in Chinese/Japanese by the source, translated from that` : ''));
     return { chapter, srcDir, outDir, files, pages, jsonPath };
 }
 

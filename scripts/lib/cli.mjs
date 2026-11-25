@@ -147,8 +147,43 @@ export async function ensureServer() {
         await sleep(1000);
     }
     clearStatus();
+    engineChild = child;
+    child.once('exit', () => { if (engineChild === child) engineChild = null; });
     // Also killed by killChildren() on exit, Ctrl+C included.
     return () => { if (!exited) killTree(child.pid); };
+}
+
+/** The engine this process started (null if none, or one you started yourself). */
+let engineChild = null;
+
+/**
+ * Kills the engine this process started, with its Chrome; the next
+ * ensureServer() starts a fresh one. Returns false if we didn't start it.
+ */
+export function restartEngine() {
+    if (!engineChild) return false;
+    killTree(engineChild.pid);
+    engineChild = null;
+    return true;
+}
+
+/**
+ * Who holds this PC's UDP ports (Windows only, else null). DNS needs a free
+ * one: when some process leaks them all, every name lookup fails (ENOTFOUND)
+ * although the internet works. Returns { total, range, top: [{ name, pid, count }] }.
+ */
+export function udpPortHolders() {
+    if (process.platform !== 'win32') return null;
+    const script = '$r=(Get-NetUDPSetting).DynamicPortRangeNumberOfPorts;$u=@(Get-NetUDPEndpoint -ErrorAction SilentlyContinue); '
+        + '$t=$u | Group-Object OwningProcess | Sort-Object Count -Descending | Select-Object -First 3 | ForEach-Object { '
+        + '@{ pid=[int]$_.Name; count=$_.Count; name=(Get-Process -Id $_.Name -ErrorAction SilentlyContinue).ProcessName } }; '
+        + '@{ total=$u.Count; range=$r; top=@($t) } | ConvertTo-Json -Compress -Depth 3';
+    try {
+        const res = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', timeout: 20_000, windowsHide: true });
+        return JSON.parse(res.stdout.trim());
+    } catch {
+        return null;
+    }
 }
 
 // --------------------------------------------------------------- output

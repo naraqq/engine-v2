@@ -75,7 +75,7 @@ export function toTextLines(block: OcrLine[]): string[] {
 
 /** Finds and reads all text on a page locally (no network). Types are assigned later by the translation step. */
 export async function detectPage(file: string, pageName: string): Promise<PageResult> {
-    const { width, height, lines } = await ocrPage(file);
+    const { width, height, lines, cjkLines } = await ocrPage(file);
     const blocks = groupLines(lines)
         .map(b => ({ ocr: b.sort((a, c) => a.box.y - c.box.y || a.box.x - c.box.x), box: union(b.map(l => l.box)) }))
         // Reading order: top to bottom, then left to right on the same row.
@@ -102,6 +102,7 @@ export async function detectPage(file: string, pageName: string): Promise<PageRe
         height,
         ocrEngine: OCR_ENGINE,
         detectedAt: new Date().toISOString(),
+        ...(cjkLines ? { cjkLines } : {}),
         regions,
     };
 }

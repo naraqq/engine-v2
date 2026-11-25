@@ -4,6 +4,11 @@ import { config } from '../config/settings.js';
 import { generateJson } from './llm.js';
 import type { Glossary, GlossaryTerm, Region, RegionType } from './types.js';
 
+/** Chinese characters and Japanese kana. */
+const CJK_CHARS = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu;
+/** Chinese scanlation group credits: 汉化 (fan translation), 翻译 (translator), 嵌字 (typesetting), 校对 (proofreading), 图源 (raw source)… */
+const CJK_CREDITS = /汉化|漢化|翻译|翻譯|嵌字|校对|校對|图源|圖源|修图|修圖|微博|QQ群|禁止转载|禁止轉載/;
+
 /** Starter terms for game-system text. Edit glossary.json per series to change them. */
 const DEFAULT_TERMS: GlossaryTerm[] = [
     { en: 'Level', mn: 'Түвшин' },
@@ -52,18 +57,19 @@ async function styleSection(): Promise<string> {
 }
 
 const SYSTEM = `You are a professional manga/webtoon translator from English into Mongolian (Cyrillic script).
+The source is an English scanlation, but scanlators sometimes leave a few bubbles in Chinese or Japanese: translate those directly from the Chinese/Japanese, the same way, as part of the same scene.
 
 INPUT: OCR text blocks in reading order, often several consecutive chapters of one series ("=== <chapter> ===" marks where each starts). Use the whole story for context: keep names, tone, running jokes and how characters address each other (чи/та) consistent across chapters.
 Each block is one line: "<id> | <text>". " / " separates the OCR lines of one block. A tag like [art], [gradient #1a2b4c] or [flat #20232a] gives the background when it isn't a plain white bubble.
 
 For every block decide:
-- skip: sound effects / onomatopoeia lettering (BOOM, HUFF, ARGHHH), signs, labels, logos, watermarks, scanlator/publisher credits and their URLs, staff roles, page numbers, OCR garbage.
+- skip: sound effects / onomatopoeia lettering (BOOM, HUFF, ARGHHH, and Chinese/Japanese ones drawn into the art like 轰, 砰, ドン, ゴゴゴ), signs, labels, logos, watermarks, scanlator/publisher credits and their URLs (also Chinese ones: 汉化, 翻译, 嵌字, 图源…), staff roles, page numbers, OCR garbage.
   NOT skip: character introduction cards (name, age, job), translator notes (TL note: ...), "To be continued...", time/place captions (narration).
   When unsure between dialogue and skip, prefer dialogue if it reads as words someone says.
 - otherwise kind = speech (bubble), thought (inner monologue), narration (caption box), or system (game-style status/notification window, often a dark/blue/gradient box or [BRACKETS]), and translate it:
   - The OCR merges words ("BECAUSEI" = "BECAUSE I") and misreads letters (0/O, 1/I/l, rn/m); read past those errors.
   - Natural, colloquial Mongolian, true to each character's voice; not word-for-word. Correct spelling, including Ө ө and Ү ү. Do not add meaning that is not in the source.
-  - Translate every English word; only product/model names, codes and stat abbreviations (ARK-2020, HP, STR) may stay Latin.
+  - Translate every English, Chinese and Japanese word; only product/model names, codes and stat abbreviations (ARK-2020, HP, STR) may stay Latin. Never leave Chinese or Japanese characters in "mn".
   - The GLOSSARY is mandatory. Transliterate new names consistently and list them in new_terms.
   - system: one Mongolian line per OCR line, joined with "\\n"; keep brackets, numbers, colons and stat layout.
   - character cards and lists ("NAME (27)" / "JOB: ..."): one line per logical line, joined with "\\n".
@@ -248,6 +254,12 @@ async function translatePass(items: Item[], glossary: Glossary, model: string): 
  */
 export function isLocalJunk(r: Region): boolean {
     const text = r.lines.join(' ');
+    // Chinese/Japanese lines: a character is a word, there are no spaces, and two characters
+    // (什么, ええ) are a whole line, so the English rules below would throw them away.
+    const cjk = text.match(CJK_CHARS)?.length ?? 0;
+    if (cjk) {
+        return CJK_CREDITS.test(text) || /https?:\/\/|www\./i.test(text);
+    }
     const letters = text.replace(/[^\p{L}\p{N}]/gu, '');
     if (letters.length < 3) {
         return true;
@@ -270,11 +282,11 @@ export function isLocalJunk(r: Region): boolean {
         || (r.style.background === 'art' && words.length <= 2 && conf < 0.8);
 }
 
-const POLISH_SYSTEM = `You are a native Mongolian editor for webtoon scanlations. You receive a chapter's draft Mongolian lines (machine translated) with the English original for meaning only.
+const POLISH_SYSTEM = `You are a native Mongolian editor for webtoon scanlations. You receive a chapter's draft Mongolian lines (machine translated) with the original (English, or sometimes Chinese/Japanese) for meaning only.
 
 Rewrite every draft so it reads like a Mongolian reader actually talks, following the MONGOLIAN VOICE below:
 - Read the draft as Mongolian first. If it sounds translated, rewrite it from scratch; do not just swap words.
-- Keep the meaning and the speaker's attitude (anger, sarcasm, laziness, swearing), not the English sentence structure.
+- Keep the meaning and the speaker's attitude (anger, sarcasm, laziness, swearing), not the original's sentence structure.
 - Shorter is usually better. Drop words the scene makes obvious.
 - Keep names exactly as in the draft, and keep glossary terms.
 - kind "system": return exactly the same number of lines as the draft, keep brackets/numbers/colons.

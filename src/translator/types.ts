@@ -42,7 +42,7 @@ export interface Region {
     container: Box | null;
     /** Raw OCR lines (with per-line boxes), exactly as the OCR read them. */
     ocr: OcrLine[];
-    /** Source (English) text, one entry per line — OCR text, corrected by the translation step. */
+    /** Source text (English, sometimes Chinese/Japanese), one entry per line — OCR text, corrected by the translation step. */
     lines: string[];
     style: TextStyle;
     /** Mongolian translation. System windows keep the source line count; others are one string to re-wrap. */
@@ -58,6 +58,8 @@ export interface PageResult {
     detectedAt: string;
     translateModel?: string;
     translatedAt?: string;
+    /** OCR lines read as Chinese/Japanese (bubbles the scanlators left untranslated). */
+    cjkLines?: number;
     regions: Region[];
 }
 

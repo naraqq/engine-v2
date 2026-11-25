@@ -4,7 +4,7 @@
  * (checked every 30 s) instead of crashing, unless waitOffline is false.
  */
 import os from 'node:os';
-import { c, say, sleep } from './cli.mjs';
+import { c, restartEngine, say, sleep, udpPortHolders } from './cli.mjs';
 import { montoonConfig } from './montoon.mjs';
 
 const clock = () => new Date().toLocaleTimeString('en-GB');
@@ -16,6 +16,32 @@ export class LostJobError extends Error {
         super(message);
         this.lost = true;
     }
+}
+
+/** When Montoon stopped answering (network errors only), and when to try self-healing next. */
+let offlineSince = null;
+let nextHealAfter = 5 * 60_000;
+
+/**
+ * Offline for a while: find out why, and free what we can. On 24 Nov the PC
+ * ran out of UDP ports, so DNS failed (ENOTFOUND) all night while the
+ * internet itself worked, and waiting never fixed it. The engine's Chrome is
+ * the likeliest holder, so the engine is restarted (it starts again with the
+ * next download). Runs after 5 minutes offline, then every 30 minutes.
+ */
+function selfHeal(host, offlineMs) {
+    const minutes = Math.round(offlineMs / 60_000);
+    const udp = udpPortHolders();
+    if (udp?.total) {
+        const top = (udp.top || []).map(p => `${p.name || '?'} (pid ${p.pid}) ${p.count}`).join(', ');
+        const full = udp.range && udp.total >= udp.range * 0.9;
+        log(c.yellow(`  ↳ ${host} unreachable for ${minutes} min. UDP ports in use: ${udp.total}${udp.range ? ` of ${udp.range}` : ''}; most held by ${top}`));
+        if (full) {
+            log(c.red(`  ↳ This PC is out of UDP ports, so name lookups (DNS) fail although the internet may work. If restarting the engine doesn't free them, close ${udp.top?.[0]?.name || 'that program'} or restart the PC.`));
+        }
+        logEvent('worker',`${host} unreachable for ${minutes} min; UDP ports in use: ${udp.total}${udp.range ? `/${udp.range}` : ''} (most: ${top})`, { level: 'warning' });
+    }
+    if (restartEngine()) log(c.yellow('  ↳ Restarted the engine and its Chrome, in case they hold the network ports.'));
 }
 
 /**
@@ -42,9 +68,16 @@ export async function mt(method, route, body, { waitOffline = true } = {}) {
             if (!waitOffline) throw error;
             if (!warned) log(c.yellow(`⚠ Can't reach ${host} (${error.cause?.code || error.message}). Retrying every 30 s…`));
             warned = true;
+            offlineSince ??= Date.now();
+            if (Date.now() - offlineSince >= nextHealAfter) {
+                nextHealAfter += 30 * 60_000;
+                selfHeal(host, Date.now() - offlineSince);
+            }
             await sleep(30_000);
             continue;
         }
+        offlineSince = null;
+        nextHealAfter = 5 * 60_000;
         const isJson = (response.headers.get('content-type') || '').includes('json');
         const payload = isJson ? await response.json().catch(() => ({})) : {};
         const transient = response.status === 429 || response.status === 502 || response.status === 504

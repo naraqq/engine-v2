@@ -2,6 +2,8 @@
 
 This PC's part of the Montoon translation pipeline. A **worker** finds chapters on source sites, downloads them, translates them into Mongolian on this PC (local OCR on the GPU, then Gemini), and uploads them to Montoon. It also fixes episodes that readers complained about.
 
+Sources are English scanlations. When the scanlators left a few bubbles in Chinese or Japanese, those are read and translated straight from the Chinese or Japanese too. That works for horizontal text only, and the worker log notes it for each chapter.
+
 The job queue, the planner lock and the settings all live on montoon.mn, so any number of PCs can run workers at once. If a PC stops, its jobs go back to the queue for the others.
 
 ## Setup
@@ -200,6 +202,7 @@ A chapter's folders are deleted once it's uploaded. Glossaries are kept.
 - **"…is not available. Deploy the backend…" / "no complaint endpoint yet"**: the Montoon backend is older than this engine. Deploy it and run `php artisan migrate`.
 - **A title is never updated**: `--montoon --only "<title>"` shows how it's matched on the source sites. If it matches the wrong series, or none, set the series with `--montoon --link <id> <url>`.
 - **OCR is slow**: check that the log says `OCR ready (… on dml)`. If it fell back to CPU, update the GPU driver.
+- **"Can't reach montoon.mn (ENOTFOUND)" for a long time while the internet works**: the PC may be out of UDP ports, so DNS fails. After 5 minutes offline the worker logs which program holds the ports and restarts the engine (and its Chrome). If that doesn't help, close the program it names or restart the PC.
 - **Nothing seems to happen**: `--work --status` shows the queue and whether workers are paused.
 
 ---
